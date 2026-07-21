@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chaos & Telemetry Lab - SigNoz Demo</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <!-- Load OpenTelemetry Browser SDK Bundle First -->
+  <script src="js/otel.bundle.js"></script>
+</head>
+<body>
+  <header>
+    <div class="nav-container">
+      <a href="index.html" class="logo">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L2 7L12 12L22 7L12 2Z" fill="#f06292"/>
+          <path d="M2 17L12 22L22 17" stroke="#f06292" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M2 12L12 17L22 12" stroke="#f06292" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Telemetry<span>Shop</span>
+      </a>
+      <nav>
+        <a href="index.html">Storefront</a>
+        <a href="chaos.html" class="active">Chaos & Telemetry Lab</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <h1>Chaos & Telemetry Lab</h1>
+      <p>Inject latency, force payment failures, or trigger manual custom counters. Use these tools to inspect SigNoz's real-time alerts and dashboard response!</p>
+    </section>
+
+    <div class="grid-2">
+      <!-- Left side: Controls -->
+      <section>
+        <!-- Panel 1: Live Chaos controls -->
+        <div class="panel">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+            </svg>
+            Express API Chaos Simulation
+            <span class="status-badge" id="chaos-status-badge">Checking...</span>
+          </h2>
+          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">
+            Configure middleware to dynamically introduce performance degradations. These settings apply globally across all active store sessions.
+          </p>
+
+          <form id="chaos-config-form">
+            <div class="form-group" style="margin-bottom: 1.5rem;">
+              <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                <label for="delay-range" style="margin-bottom: 0;">Latent Delay: <span id="delay-val" style="color: var(--primary); font-weight: 800;">0</span>ms</label>
+              </div>
+              <input type="range" id="delay-range" class="form-control" min="0" max="3000" step="50" value="0" style="padding: 0;">
+              <span style="font-size: 0.75rem; color: var(--text-muted);">Simulates database lock delay or slow external API calls.</span>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 1.5rem;">
+              <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                <label for="error-range" style="margin-bottom: 0;">Forced Checkout Error Rate: <span id="error-val" style="color: var(--error); font-weight: 800;">0</span>%</label>
+              </div>
+              <input type="range" id="error-range" class="form-control" min="0" max="100" step="5" value="0" style="padding: 0;">
+              <span style="font-size: 0.75rem; color: var(--text-muted);">Forced chance of random out-of-stock or billing failure exceptions.</span>
+            </div>
+
+            <div style="display: flex; gap: 1rem;">
+              <button type="submit" class="btn" id="update-chaos-btn">Save Configurations</button>
+              <button type="button" class="btn btn-secondary" id="disable-chaos-btn">Disable Chaos</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Panel 2: Send custom telemetry events -->
+        <div class="panel">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 20V10M12 20V4M6 20v-6" />
+            </svg>
+            Emit Business Telemetry Metrics
+          </h2>
+          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">
+            Directly increments custom OpenTelemetry counters on the server. In SigNoz, navigate to the **Metrics** explorer and query the `demo.custom_events` counter!
+          </p>
+
+          <div class="telemetry-triggers">
+            <div class="trigger-card">
+              <div class="trigger-title">Banner Clicked</div>
+              <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.35rem 0.75rem; width: 100%; justify-content: center;" onclick="sendCustomMetric('banner_clicked')">
+                Emit Count +1
+              </button>
+            </div>
+            <div class="trigger-card">
+              <div class="trigger-title">Newsletter Signup</div>
+              <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.35rem 0.75rem; width: 100%; justify-content: center;" onclick="sendCustomMetric('newsletter_signup')">
+                Emit Count +1
+              </button>
+            </div>
+            <div class="trigger-card">
+              <div class="trigger-title">Add Promo Code</div>
+              <button class="btn btn-outline" style="font-size: 0.8rem; padding: 0.35rem 0.75rem; width: 100%; justify-content: center;" onclick="sendCustomMetric('promo_code_failure', { promo: 'EXPIRED2026' })">
+                Emit Failure +1
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right side: Lab Terminal Console Logs -->
+      <aside class="sidebar" style="width: 100%; top: 6rem;">
+        <h2>Lab Console Log Output</h2>
+        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+          Real-time updates of client operations, latency events, and OTLP proxy states.
+        </p>
+        <div class="terminal" id="terminal-console">
+          <div class="terminal-line info">[SYSTEM] Lab initialized. Awaiting user interaction...</div>
+        </div>
+        <button class="btn btn-secondary" style="width: 100%; justify-content: center; margin-top: 1rem;" id="clear-terminal-btn">
+          Clear Console Logs
+        </button>
+
+        <div style="margin-top: 2rem; border-top: 1px solid var(--border); padding-top: 1.5rem;">
+          <h3 style="font-size: 0.95rem; margin-bottom: 0.5rem;">Generate Trace Bursts</h3>
+          <p style="color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem;">
+            Quickly trigger 10 parallel API operations to simulate load bursts and verify service charts.
+          </p>
+          <button class="btn btn-danger" style="width: 100%; justify-content: center;" id="burst-btn">
+            Trigger 10x API Load Burst
+          </button>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <div class="toast" id="toast">
+    <span class="toast-icon">✓</span>
+    <span id="toast-message">Success!</span>
+  </div>
+
+  <script src="js/chaos.js"></script>
+</body>
+</html>

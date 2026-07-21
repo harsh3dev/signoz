@@ -1,0 +1,37 @@
+[
+  {
+    "id": "prod-001",
+    "name": "SigNoz Premium T-Shirt",
+    "description": "Show off your high-cardinality observability pride with this 100% organic cotton tee.",
+    "price": 2500,
+    "image": "https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=300&q=80"
+  },
+  {
+    "id": "prod-002",
+    "name": "Trace Identifier Mug",
+    "description": "Never lose your trace context again. Changes color when hot beverages are added.",
+    "price": 1500,
+    "image": "https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?w=300&q=80"
+  },
+  {
+    "id": "prod-003",
+    "name": "High-Cardinality Hoodie",
+    "description": "Super soft fleece hoodie. Handles millions of concurrent warmth tags with sub-millisecond latency.",
+    "price": 4500,
+    "image": "https://images.unsplash.com/photo-1556821840-3a63f95609a7?w=300&q=80"
+  },
+  {
+    "id": "prod-004",
+    "name": "ClickHouse Quick-Start Book",
+    "description": "The ultimate guide to running column-oriented databases at petabyte scale.",
+    "price": 3200,
+    "image": "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=300&q=80"
+  },
+  {
+    "id": "prod-005",
+    "name": "Latency Buffer Sticker Pack",
+    "description": "Stickers to put on your laptop. Guaranteed to absorb up to 500ms of visual clutter.",
+    "price": 500,
+    "image": "https://images.unsplash.com/photo-1572375995301-401894e82c4e?w=300&q=80"
+  }
+]

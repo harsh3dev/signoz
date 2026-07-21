@@ -1,0 +1,37 @@
+{
+  "name": "telemetry-shop",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SigNoz integration demo application",
+  "main": "src/app.js",
+  "scripts": {
+    "build": "npx esbuild src/public-src/otel.js --bundle --minify --outfile=public/js/otel.bundle.js",
+    "start": "node --import ./src/instrumentation.js src/app.js",
+    "dev": "npm run build && node --import ./src/instrumentation.js src/app.js"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "^0.53.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.50.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.53.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.53.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.53.0",
+    "@opentelemetry/sdk-logs": "^0.53.0",
+    "@opentelemetry/sdk-node": "^0.53.0",
+    "@opentelemetry/winston-transport": "^0.4.0",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "@opentelemetry/context-zone": "^1.26.0",
+    "@opentelemetry/instrumentation": "^0.53.0",
+    "@opentelemetry/instrumentation-fetch": "^0.53.0",
+    "@opentelemetry/resources": "^1.26.0",
+    "@opentelemetry/sdk-trace-base": "^1.26.0",
+    "@opentelemetry/sdk-trace-web": "^1.26.0",
+    "esbuild": "^0.23.0"
+  }
+}
