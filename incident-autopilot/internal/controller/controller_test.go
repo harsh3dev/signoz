@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/config"
+	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/model"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/policy"
 )
@@ -48,7 +49,23 @@ func (noopRecorder) RecordRecommendation(model.Recommendation) {}
 func (noopRecorder) RecordPublishedReplicas(int32)             {}
 func (noopRecorder) RecordObservedReplicas(int32)              {}
 func (noopRecorder) RecordDecision(model.Recommendation)       {}
-func (noopRecorder) Heartbeat()                                {}
+func (noopRecorder) RecordIncidentReport(model.Recommendation, model.Verification, int32, int32) {
+}
+func (noopRecorder) Heartbeat() {}
+
+type recordingRecorder struct {
+	reports []model.Verification
+}
+
+func (r *recordingRecorder) RecordRecommendation(model.Recommendation) {}
+func (r *recordingRecorder) RecordPublishedReplicas(int32)             {}
+func (r *recordingRecorder) RecordObservedReplicas(int32)              {}
+func (r *recordingRecorder) RecordDecision(model.Recommendation)       {}
+func (r *recordingRecorder) Heartbeat()                                {}
+
+func (r *recordingRecorder) RecordIncidentReport(_ model.Recommendation, verification model.Verification, _, _ int32) {
+	r.reports = append(r.reports, verification)
+}
 
 func testConfig(t *testing.T, mode string) config.Config {
 	t.Helper()
@@ -182,5 +199,294 @@ func TestIndeterminateSnapshotPublishesCurrentReplicas(t *testing.T) {
 	}
 	if got := c.PublishedReplicas(); got != 3 {
 		t.Fatalf("expected published replicas to fail closed to observed count 3, got %d", got)
+	}
+}
+
+type sequenceSnapshots struct {
+	values []model.Snapshot
+	err    error
+	calls  int
+}
+
+func (s *sequenceSnapshots) Snapshot(_ context.Context, _ config.Config, replicas int32) (model.Snapshot, error) {
+	if s.err != nil {
+		return model.Snapshot{}, s.err
+	}
+	idx := s.calls
+	s.calls++
+	if idx >= len(s.values) {
+		idx = len(s.values) - 1
+	}
+	snap := s.values[idx]
+	snap.CurrentReplicas = replicas
+	return snap, nil
+}
+
+type fakeRollout struct {
+	target      kube.TargetState
+	waitErr     error
+	targetCalls int
+}
+
+func (f *fakeRollout) Target(context.Context) (kube.TargetState, error) {
+	f.targetCalls++
+	return f.target, nil
+}
+
+func (f *fakeRollout) WaitForRollout(context.Context, int64, time.Duration) error {
+	return f.waitErr
+}
+
+func TestVerificationMarksRecoveredWhenSLIMeetsObjective(t *testing.T) {
+	cfg := testConfig(t, "automatic")
+	cfg.Signals.SLIObjective = 0.99
+	cfg.Controller.VerificationWindow = 0
+
+	before := model.Snapshot{
+		CurrentReplicas: 2,
+		SLI:             0.92,
+		P95MS:           1200,
+		ErrorRate:       0.08,
+	}
+	rec := model.Recommendation{
+		ID:                  "rec-1",
+		Decision:            model.DecisionScaleUp,
+		CurrentReplicas:     2,
+		RecommendedReplicas: 6,
+	}
+
+	snapshots := &sequenceSnapshots{values: []model.Snapshot{
+		{SLI: 0.995, P95MS: 800, ErrorRate: 0.01},
+	}}
+	rollout := &fakeRollout{target: kube.TargetState{Generation: 2, DesiredReplicas: 6, AvailableReplicas: 6}}
+
+	c, err := New(cfg, policy.New(cfg), snapshots, fakeReplicas{n: 2}, noopRecorder{}, []byte("secret"),
+		WithRolloutVerifier(rollout),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	verification, err := c.Verify(context.Background(), before, rec)
+	if err != nil {
+		t.Fatalf("unexpected verify error: %v", err)
+	}
+	if verification.Result != "recovered" {
+		t.Fatalf("expected recovered, got %s", verification.Result)
+	}
+	if verification.AfterSLI != 0.995 {
+		t.Fatalf("expected after SLI 0.995, got %f", verification.AfterSLI)
+	}
+}
+
+func TestVerificationMarksIneffectiveWhenSLIStillFails(t *testing.T) {
+	cfg := testConfig(t, "automatic")
+	cfg.Signals.SLIObjective = 0.99
+	cfg.Controller.VerificationWindow = 0
+
+	before := model.Snapshot{
+		CurrentReplicas: 2,
+		SLI:             0.92,
+		P95MS:           1200,
+		ErrorRate:       0.08,
+	}
+	rec := model.Recommendation{
+		ID:                  "rec-2",
+		Decision:            model.DecisionScaleUp,
+		CurrentReplicas:     2,
+		RecommendedReplicas: 6,
+	}
+
+	snapshots := &sequenceSnapshots{values: []model.Snapshot{
+		{SLI: 0.90, P95MS: 1300, ErrorRate: 0.09},
+	}}
+	rollout := &fakeRollout{target: kube.TargetState{Generation: 2, DesiredReplicas: 6, AvailableReplicas: 6}}
+
+	c, err := New(cfg, policy.New(cfg), snapshots, fakeReplicas{n: 2}, noopRecorder{}, []byte("secret"),
+		WithRolloutVerifier(rollout),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	verification, err := c.Verify(context.Background(), before, rec)
+	if err != nil {
+		t.Fatalf("unexpected verify error: %v", err)
+	}
+	if verification.Result != "ineffective" {
+		t.Fatalf("expected ineffective, got %s", verification.Result)
+	}
+}
+
+func TestClassifyVerificationImproved(t *testing.T) {
+	before := model.Snapshot{SLI: 0.92, P95MS: 1200, ErrorRate: 0.08}
+	after := model.Snapshot{SLI: 0.96, P95MS: 900, ErrorRate: 0.03}
+	if got := classifyVerification(before, after, 0.99); got != "improved" {
+		t.Fatalf("expected improved, got %s", got)
+	}
+}
+
+func TestVerificationRolloutFailed(t *testing.T) {
+	cfg := testConfig(t, "automatic")
+	cfg.Controller.VerificationWindow = 0
+
+	before := model.Snapshot{
+		CurrentReplicas: 2,
+		SLI:             0.92,
+		P95MS:           1200,
+		ErrorRate:       0.08,
+	}
+	rec := model.Recommendation{
+		ID:                  "rec-rollout-failed",
+		Decision:            model.DecisionScaleUp,
+		CurrentReplicas:     2,
+		RecommendedReplicas: 6,
+	}
+
+	recorder := &recordingRecorder{}
+	rollout := &fakeRollout{
+		target:  kube.TargetState{Generation: 2, DesiredReplicas: 6, AvailableReplicas: 1},
+		waitErr: errors.New("rollout timed out"),
+	}
+
+	c, err := New(cfg, policy.New(cfg), &sequenceSnapshots{}, fakeReplicas{n: 2}, recorder, []byte("secret"),
+		WithRolloutVerifier(rollout),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	verification, err := c.Verify(context.Background(), before, rec)
+	if err != nil {
+		t.Fatalf("unexpected verify error: %v", err)
+	}
+	if verification.Result != "rollout_failed" {
+		t.Fatalf("expected rollout_failed, got %s", verification.Result)
+	}
+	if len(recorder.reports) != 1 {
+		t.Fatalf("expected one incident report, got %d", len(recorder.reports))
+	}
+	if recorder.reports[0].Result != "rollout_failed" {
+		t.Fatalf("expected incident report rollout_failed, got %s", recorder.reports[0].Result)
+	}
+}
+
+func TestAutomaticModeVerifiesAfterScale(t *testing.T) {
+	cfg := testConfig(t, "automatic")
+	cfg.Controller.VerificationWindow = 0
+
+	recorder := &recordingRecorder{}
+	snapshots := &sequenceSnapshots{values: []model.Snapshot{
+		{RequestRate: 140, P95MS: 1200, ErrorRate: 0.08, SLI: 0.92, Available: 2},
+		{SLI: 0.995, P95MS: 800, ErrorRate: 0.01},
+	}}
+	rollout := &fakeRollout{target: kube.TargetState{Generation: 2, DesiredReplicas: 6, AvailableReplicas: 6}}
+
+	c, err := New(cfg, policy.New(cfg), snapshots, fakeReplicas{n: 2}, recorder, []byte("secret"),
+		WithRolloutVerifier(rollout),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := c.Evaluate(context.Background()); err != nil {
+		t.Fatalf("unexpected evaluate error: %v", err)
+	}
+	if got := c.PublishedReplicas(); got != 6 {
+		t.Fatalf("expected published replicas 6, got %d", got)
+	}
+	if len(recorder.reports) != 1 {
+		t.Fatalf("expected one incident report after automatic scale, got %d", len(recorder.reports))
+	}
+	if recorder.reports[0].Result != "recovered" {
+		t.Fatalf("expected recovered verification, got %s", recorder.reports[0].Result)
+	}
+}
+
+func TestApproveVerifiesAfterScale(t *testing.T) {
+	cfg := testConfig(t, "approval")
+	cfg.Controller.VerificationWindow = 0
+	secret := []byte("secret")
+
+	recorder := &recordingRecorder{}
+	snapshots := &sequenceSnapshots{values: []model.Snapshot{
+		{RequestRate: 140, P95MS: 1200, ErrorRate: 0.08, SLI: 0.92, Available: 2},
+		{SLI: 0.995, P95MS: 800, ErrorRate: 0.01},
+	}}
+	rollout := &fakeRollout{target: kube.TargetState{Generation: 2, DesiredReplicas: 6, AvailableReplicas: 6}}
+
+	c, err := New(cfg, policy.New(cfg), snapshots, fakeReplicas{n: 2}, recorder, secret,
+		WithRolloutVerifier(rollout),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := c.Evaluate(context.Background()); err != nil {
+		t.Fatalf("unexpected evaluate error: %v", err)
+	}
+	if len(recorder.reports) != 0 {
+		t.Fatalf("expected no incident report before approval, got %d", len(recorder.reports))
+	}
+
+	rec := c.PendingRecommendation()
+	now := rec.CreatedAt.Add(time.Second)
+	token := SignApproval(secret, rec.ID, rec.ExpiresAt)
+	if err := c.Approve(context.Background(), rec.ID, token, "alice", now); err != nil {
+		t.Fatalf("unexpected approve error: %v", err)
+	}
+	if got := c.PublishedReplicas(); got != rec.RecommendedReplicas {
+		t.Fatalf("expected published replicas %d after approval, got %d", rec.RecommendedReplicas, got)
+	}
+	if len(recorder.reports) != 1 {
+		t.Fatalf("expected one incident report after approval, got %d", len(recorder.reports))
+	}
+	if recorder.reports[0].Result != "recovered" {
+		t.Fatalf("expected recovered verification, got %s", recorder.reports[0].Result)
+	}
+}
+
+func TestApproveVerifiesRolloutFailed(t *testing.T) {
+	cfg := testConfig(t, "approval")
+	cfg.Controller.VerificationWindow = 0
+	secret := []byte("secret")
+
+	recorder := &recordingRecorder{}
+	snapshots := &sequenceSnapshots{values: []model.Snapshot{
+		{RequestRate: 140, P95MS: 1200, ErrorRate: 0.08, SLI: 0.92, Available: 2},
+	}}
+	rollout := &fakeRollout{
+		target:  kube.TargetState{Generation: 2, DesiredReplicas: 6, AvailableReplicas: 1},
+		waitErr: errors.New("rollout timed out"),
+	}
+
+	c, err := New(cfg, policy.New(cfg), snapshots, fakeReplicas{n: 2}, recorder, secret,
+		WithRolloutVerifier(rollout),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if err := c.Evaluate(context.Background()); err != nil {
+		t.Fatalf("unexpected evaluate error: %v", err)
+	}
+
+	rec := c.PendingRecommendation()
+	now := rec.CreatedAt.Add(time.Second)
+	token := SignApproval(secret, rec.ID, rec.ExpiresAt)
+	if err := c.Approve(context.Background(), rec.ID, token, "alice", now); err != nil {
+		t.Fatalf("unexpected approve error: %v", err)
+	}
+	if len(recorder.reports) != 1 {
+		t.Fatalf("expected one incident report after failed rollout, got %d", len(recorder.reports))
+	}
+	if recorder.reports[0].Result != "rollout_failed" {
+		t.Fatalf("expected rollout_failed verification, got %s", recorder.reports[0].Result)
 	}
 }

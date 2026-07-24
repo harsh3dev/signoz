@@ -93,7 +93,7 @@ demo-app/
 - Produces: `model.Snapshot`, `model.PodSnapshot`, `model.Recommendation`, `model.Action`, and `model.Verification`
 - Produces: validated operating modes `dry-run`, `approval`, and `automatic`
 
-- [ ] **Step 1: Initialize the Go module**
+- [x] **Step 1: Initialize the Go module**
 
 Create `incident-autopilot/go.mod`:
 
@@ -122,7 +122,7 @@ go mod tidy
 
 Expected: dependencies resolve and `go.sum` is created.
 
-- [ ] **Step 2: Define the domain model**
+- [x] **Step 2: Define the domain model**
 
 Create `incident-autopilot/internal/model/types.go`:
 
@@ -206,7 +206,7 @@ type Verification struct {
 }
 ```
 
-- [ ] **Step 3: Write failing configuration tests**
+- [x] **Step 3: Write failing configuration tests**
 
 Create `incident-autopilot/internal/config/config_test.go`:
 
@@ -270,7 +270,7 @@ controller:
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they fail**
+- [x] **Step 4: Run tests to verify they fail**
 
 Run:
 
@@ -280,7 +280,7 @@ go test ./internal/config -v
 
 Expected: FAIL because `Config` and `Load` do not exist.
 
-- [ ] **Step 5: Implement configuration loading and validation**
+- [x] **Step 5: Implement configuration loading and validation**
 
 Create `incident-autopilot/internal/config/config.go` with typed sections for
 SigNoz, target, signals, policy, pod outliers, and controller. `Validate` must
@@ -379,7 +379,7 @@ func (c Config) Validate() error {
 }
 ```
 
-- [ ] **Step 6: Add the runnable example configuration**
+- [x] **Step 6: Add the runnable example configuration**
 
 Create `incident-autopilot/config.example.yaml`:
 
@@ -424,7 +424,7 @@ controller:
 Also create a minimal `incident-autopilot/Makefile` with `build` and `test`
 targets.
 
-- [ ] **Step 7: Run tests and static checks**
+- [x] **Step 7: Run tests and static checks**
 
 Run:
 
@@ -435,7 +435,7 @@ go vet ./...
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit the foundation**
+- [x] **Step 8: Commit the foundation**
 
 ```bash
 git add incident-autopilot
@@ -458,7 +458,7 @@ git commit -m "feat: scaffold incident autopilot controller"
 - Produces: resource attributes `k8s.namespace.name`, `k8s.deployment.name`, `k8s.pod.name`, and `k8s.pod.uid`
 - Produces: deterministic `capacity` and `bad-pod` scenarios
 
-- [ ] **Step 1: Add deterministic health and behavior state**
+- [x] **Step 1: Add deterministic health and behavior state**
 
 Add a pod-local behavior object in `demo-app/src/app.js`:
 
@@ -506,7 +506,7 @@ completion points, record `checkoutRequestsCounter.add(1, {status})` and
 `failed`. These underscore metric names are the exact names used by
 `config.example.yaml`.
 
-- [ ] **Step 2: Add Kubernetes resource attributes**
+- [x] **Step 2: Add Kubernetes resource attributes**
 
 Extend the resource in `demo-app/src/instrumentation.js`:
 
@@ -522,7 +522,7 @@ const resource = new Resource({
 });
 ```
 
-- [ ] **Step 3: Create the image**
+- [x] **Step 3: Create the image**
 
 Create `demo-app/Dockerfile`:
 
@@ -537,7 +537,7 @@ EXPOSE 3000
 CMD ["npm", "start"]
 ```
 
-- [ ] **Step 4: Create Kubernetes manifests**
+- [x] **Step 4: Create Kubernetes manifests**
 
 Create `incident-autopilot/deploy/demo-app.yaml` with:
 
@@ -576,7 +576,7 @@ spec:
               fieldPath: metadata.uid
 ```
 
-- [ ] **Step 5: Create deterministic load**
+- [x] **Step 5: Create deterministic load**
 
 Create `incident-autopilot/deploy/load-generator.yaml` using
 `grafana/k6:0.57.0`. Mount a script that sends valid checkout requests and
@@ -595,7 +595,7 @@ kubectl -n autopilot-demo rollout status deployment/checkout-api --timeout=120s
 
 Expected: two ready pods and `/api/health/ready` returns HTTP 200.
 
-- [ ] **Step 7: Commit the deterministic demo**
+- [x] **Step 7: Commit the deterministic demo**
 
 ```bash
 git add demo-app incident-autopilot/deploy
@@ -615,7 +615,7 @@ git commit -m "feat: add deterministic Kubernetes demo workload"
 - Produces: `signoz.Client.Snapshot(ctx, cfg, replicas) (model.Snapshot, error)`
 - `signoz.Scalar` distinguishes missing data from numeric zero
 
-- [ ] **Step 1: Write response-decoding tests**
+- [x] **Step 1: Write response-decoding tests**
 
 Test these cases with `httptest.Server`:
 
@@ -628,7 +628,7 @@ func TestSnapshotRejectsStaleSignals(t *testing.T)
 
 The stale test must assert `errors.Is(err, signoz.ErrStaleTelemetry)`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -638,7 +638,7 @@ go test ./internal/signoz -v
 
 Expected: FAIL because the package does not exist.
 
-- [ ] **Step 3: Implement the client**
+- [x] **Step 3: Implement the client**
 
 Create these public contracts in `incident-autopilot/internal/signoz/client.go`:
 
@@ -673,7 +673,7 @@ reject partial points, and return the newest complete point. `Snapshot` must
 query all service signals concurrently and fail closed if any required signal
 is absent or older than `FreshnessLimit`.
 
-- [ ] **Step 4: Add pod-scoped query expansion**
+- [x] **Step 4: Add pod-scoped query expansion**
 
 Implement:
 
@@ -685,7 +685,7 @@ It must use a validated pod name and inject `k8s_pod_name="<pod>"` only into a
 known template marker `${POD_FILTER}`. Do not concatenate untrusted text into
 arbitrary PromQL.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 go test ./internal/signoz -v
@@ -694,7 +694,7 @@ go test ./...
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the SigNoz reader**
+- [x] **Step 6: Commit the SigNoz reader**
 
 ```bash
 git add incident-autopilot/internal/signoz
@@ -713,7 +713,7 @@ git commit -m "feat: query trusted service telemetry from SigNoz"
 - Consumes: `model.Snapshot` and `config.Policy`
 - Produces: `policy.Engine.Evaluate(snapshot, now) model.Recommendation`
 
-- [ ] **Step 1: Write table-driven policy tests**
+- [x] **Step 1: Write table-driven policy tests**
 
 Cover:
 
@@ -741,7 +741,7 @@ snapshot := model.Snapshot{
 
 With target 25 requests/replica and maximum step 4, expect six replicas.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 ```bash
 go test ./internal/policy -v
@@ -749,7 +749,7 @@ go test ./internal/policy -v
 
 Expected: FAIL because `Engine` does not exist.
 
-- [ ] **Step 3: Implement deterministic classification**
+- [x] **Step 3: Implement deterministic classification**
 
 Create `incident-autopilot/internal/policy/engine.go` with:
 
@@ -776,7 +776,7 @@ Decision order:
 8. Scale down by at most `MaxScaleDownStep` only when SLI, latency, and errors
    are all healthy for three consecutive evaluations.
 
-- [ ] **Step 4: Generate evidence and explanation without an LLM**
+- [x] **Step 4: Generate evidence and explanation without an LLM**
 
 Build the recommendation reason from structured evidence. The capacity example
 must render:
@@ -785,7 +785,7 @@ must render:
 Capacity pressure: request rate 140.0/s requires 6 replicas at 25.0/s per replica; P95 latency 1200ms exceeds 800ms; SLI 92.00% is below 99.00%.
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 go test ./internal/policy -v
@@ -793,7 +793,7 @@ go test ./internal/policy -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the policy**
+- [x] **Step 6: Commit the policy**
 
 ```bash
 git add incident-autopilot/internal/policy
@@ -818,7 +818,7 @@ git commit -m "feat: add explainable autoscaling policy"
 - Produces: `/metrics` for KEDA
 - Produces: OTLP metrics and structured decision logs
 
-- [ ] **Step 1: Write controller-state tests**
+- [x] **Step 1: Write controller-state tests**
 
 Cover:
 
@@ -830,7 +830,7 @@ func TestApprovalIsIdempotent(t *testing.T)
 func TestIndeterminateSnapshotPublishesCurrentReplicas(t *testing.T)
 ```
 
-- [ ] **Step 2: Implement persisted state**
+- [x] **Step 2: Implement persisted state**
 
 Persist this JSON atomically to `StatePath`:
 
@@ -845,7 +845,7 @@ type State struct {
 Write to a temporary file, `fsync`, then rename. Load it at startup. Never
 execute an action twice for the same recommendation ID.
 
-- [ ] **Step 3: Implement approval authentication**
+- [x] **Step 3: Implement approval authentication**
 
 Create an HMAC token from recommendation ID and expiry:
 
@@ -864,7 +864,7 @@ immutable recommendation, evidence, expiry, and an approval form. The form posts
 the signed recommendation ID to `POST /api/actions/{id}/approve`; it never
 accepts a replica count or pod name from the browser.
 
-- [ ] **Step 4: Implement telemetry**
+- [x] **Step 4: Implement telemetry**
 
 Export:
 
@@ -879,7 +879,7 @@ Expose only bounded labels: service, namespace, deployment, decision, reason
 code, and policy version. Put action IDs and full explanations in structured
 logs, not metric labels.
 
-- [ ] **Step 5: Run controller tests**
+- [x] **Step 5: Run controller tests**
 
 ```bash
 go test ./internal/controller ./internal/telemetry -v
@@ -887,7 +887,7 @@ go test ./internal/controller ./internal/telemetry -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the controller loop**
+- [x] **Step 6: Commit the controller loop**
 
 ```bash
 git add incident-autopilot/cmd incident-autopilot/internal/controller incident-autopilot/internal/telemetry
@@ -908,7 +908,7 @@ git commit -m "feat: add approval-gated controller loop"
 - Consumes: `autopilot_recommended_replicas` from Autopilot `/metrics`
 - Produces: KEDA `ScaledObject` and HPA controlling `checkout-api`
 
-- [ ] **Step 1: Package Autopilot**
+- [x] **Step 1: Package Autopilot**
 
 Create a multi-stage `incident-autopilot/Dockerfile`:
 
@@ -926,7 +926,7 @@ USER nonroot:nonroot
 ENTRYPOINT ["/autopilot"]
 ```
 
-- [ ] **Step 2: Create least-privilege RBAC**
+- [x] **Step 2: Create least-privilege RBAC**
 
 Grant:
 
@@ -936,7 +936,7 @@ Grant:
 
 Do not grant wildcard verbs or cluster-admin.
 
-- [ ] **Step 3: Create the KEDA ScaledObject**
+- [x] **Step 3: Create the KEDA ScaledObject**
 
 Create `incident-autopilot/deploy/scaledobject.yaml`:
 
@@ -1001,7 +1001,7 @@ Expected:
 - Approved recommendation changes desired replicas to six.
 - HPA never exceeds ten replicas.
 
-- [ ] **Step 5: Commit KEDA deployment**
+- [x] **Step 5: Commit KEDA deployment**
 
 ```bash
 git add incident-autopilot/deploy incident-autopilot/Dockerfile
@@ -1023,7 +1023,7 @@ git commit -m "feat: connect approved recommendations to KEDA"
 - Produces: `kube.Client.WaitForRollout(ctx, generation, timeout) error`
 - Produces: `controller.Verify(ctx, before, recommendation) model.Verification`
 
-- [ ] **Step 1: Write fake-client tests**
+- [x] **Step 1: Write fake-client tests**
 
 Use `k8s.io/client-go/kubernetes/fake` to cover:
 
@@ -1035,13 +1035,13 @@ func TestVerificationMarksRecoveredWhenSLIMeetsObjective(t *testing.T)
 func TestVerificationMarksIneffectiveWhenSLIStillFails(t *testing.T)
 ```
 
-- [ ] **Step 2: Implement Kubernetes target reading**
+- [x] **Step 2: Implement Kubernetes target reading**
 
 `TargetState` must include Deployment UID, generation, desired replicas,
 available replicas, and owned Pods. Validate Pod owner references through the
 ReplicaSet to the configured Deployment before permitting any pod action.
 
-- [ ] **Step 3: Implement post-scale verification**
+- [x] **Step 3: Implement post-scale verification**
 
 After KEDA changes desired replicas:
 
@@ -1055,7 +1055,7 @@ Recovered means SLI meets objective and neither latency nor error rate worsened.
 Improved means SLI increased but remains below objective. Ineffective means SLI
 did not improve.
 
-- [ ] **Step 4: Emit an incident report**
+- [x] **Step 4: Emit an incident report**
 
 Emit a structured OTLP log with:
 
@@ -1073,7 +1073,7 @@ Emit a structured OTLP log with:
 }
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 go test ./internal/kube ./internal/controller ./internal/telemetry -v

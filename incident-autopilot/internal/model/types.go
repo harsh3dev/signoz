@@ -75,3 +75,10 @@ type Verification struct {
 	AfterErrorRate   float64
 	Result           string
 }
+
+// ReplicaStatus is the minimal Kubernetes replica state combined with
+// SigNoz signals during evaluation and verification.
+type ReplicaStatus struct {
+	Current   int32
+	Available int32
+}

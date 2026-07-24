@@ -19,13 +19,13 @@ import (
 
 	otellog "go.opentelemetry.io/otel/log"
 	otelmetric "go.opentelemetry.io/otel/metric"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/config"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/controller"
+	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/policy"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/signoz"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/telemetry"
@@ -57,7 +57,7 @@ func main() {
 	}
 	signozClient := signoz.NewClient(cfg.SigNoz.URL, signozAPIKey)
 
-	replicaReader, err := newKubeReplicaReader(*kubeconfig, cfg.Target.Namespace, cfg.Target.Deployment)
+	kubeClient, err := newKubeClient(*kubeconfig, cfg)
 	if err != nil {
 		log.Fatalf("build kubernetes client: %v", err)
 	}
@@ -92,7 +92,7 @@ func main() {
 	}
 
 	engine := policy.New(cfg)
-	ctrl, err := controller.New(cfg, engine, signozClient, replicaReader, emitter, approvalSecret,
+	ctrl, err := controller.New(cfg, engine, signozClient, kubeClient, emitter, approvalSecret,
 		controller.WithMetricsHandler(emitter.Handler()),
 		controller.WithPrometheusAPIHandler(emitter.InstantQueryHandler()))
 	if err != nil {
@@ -135,17 +135,7 @@ func main() {
 	}
 }
 
-// kubeReplicaReader is a minimal, read-only ReplicaReader backed by the
-// Deployments API. It is intentionally narrow: the full Kubernetes reader
-// (rollout verification, pod ownership, quarantine) is added by a later
-// task as internal/kube.Client, which will replace this type in main.go.
-type kubeReplicaReader struct {
-	clientset  *kubernetes.Clientset
-	namespace  string
-	deployment string
-}
-
-func newKubeReplicaReader(kubeconfigPath, namespace, deployment string) (*kubeReplicaReader, error) {
+func newKubeClient(kubeconfigPath string, cfg config.Config) (*kube.Client, error) {
 	restConfig, err := loadRESTConfig(kubeconfigPath)
 	if err != nil {
 		return nil, err
@@ -154,7 +144,7 @@ func newKubeReplicaReader(kubeconfigPath, namespace, deployment string) (*kubeRe
 	if err != nil {
 		return nil, fmt.Errorf("build kubernetes clientset: %w", err)
 	}
-	return &kubeReplicaReader{clientset: clientset, namespace: namespace, deployment: deployment}, nil
+	return kube.New(cfg, clientset), nil
 }
 
 func loadRESTConfig(kubeconfigPath string) (*rest.Config, error) {
@@ -171,15 +161,4 @@ func loadRESTConfig(kubeconfigPath string) (*rest.Config, error) {
 		return nil, fmt.Errorf("load kubeconfig %q: %w", kubeconfigPath, err)
 	}
 	return cfg, nil
-}
-
-func (r *kubeReplicaReader) Replicas(ctx context.Context) (controller.ReplicaStatus, error) {
-	deploy, err := r.clientset.AppsV1().Deployments(r.namespace).Get(ctx, r.deployment, metav1.GetOptions{})
-	if err != nil {
-		return controller.ReplicaStatus{}, fmt.Errorf("get deployment %s/%s: %w", r.namespace, r.deployment, err)
-	}
-	return controller.ReplicaStatus{
-		Current:   deploy.Status.Replicas,
-		Available: deploy.Status.AvailableReplicas,
-	}, nil
 }

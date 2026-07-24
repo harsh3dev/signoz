@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/config"
+	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/model"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/policy"
 )
@@ -34,17 +35,18 @@ type SnapshotProvider interface {
 }
 
 // ReplicaStatus is the minimal Kubernetes replica state the controller needs
-// to combine with SigNoz signals. The full Kubernetes reader (kube.Client,
-// added in a later task) will implement ReplicaReader with richer target
-// data available through its own Target() method.
-type ReplicaStatus struct {
-	Current   int32 // total replicas observed on the Deployment.
-	Available int32 // ready/available replicas.
-}
+// to combine with SigNoz signals.
+type ReplicaStatus = model.ReplicaStatus
 
-// ReplicaReader is satisfied by the Kubernetes reader added in a later task.
+// ReplicaReader is satisfied by kube.Client.
 type ReplicaReader interface {
 	Replicas(ctx context.Context) (ReplicaStatus, error)
+}
+
+// RolloutVerifier waits for a Deployment rollout to complete.
+type RolloutVerifier interface {
+	Target(ctx context.Context) (kube.TargetState, error)
+	WaitForRollout(ctx context.Context, generation int64, timeout time.Duration) error
 }
 
 // Recorder is satisfied by telemetry.Emitter.
@@ -56,6 +58,7 @@ type Recorder interface {
 	// RecordObservedReplicas sets the informational, raw observed count.
 	RecordObservedReplicas(replicas int32)
 	RecordDecision(rec model.Recommendation)
+	RecordIncidentReport(rec model.Recommendation, verification model.Verification, beforeReplicas, afterReplicas int32)
 	Heartbeat()
 }
 
@@ -63,7 +66,9 @@ type Recorder interface {
 // never re-executes or forgets an in-flight action.
 type State struct {
 	LastRecommendation model.Recommendation `json:"last_recommendation"`
+	LastSnapshot       model.Snapshot       `json:"last_snapshot"`
 	LastAction         model.Action         `json:"last_action"`
+	LastVerification   model.Verification   `json:"last_verification"`
 	PublishedReplicas  int32                `json:"published_replicas"`
 }
 
@@ -72,6 +77,7 @@ type Controller struct {
 	engine             *policy.Engine
 	snapshots          SnapshotProvider
 	replicas           ReplicaReader
+	rollout            RolloutVerifier
 	recorder           Recorder
 	approvalSecret     []byte
 	metricsHandler     http.Handler
@@ -80,6 +86,7 @@ type Controller struct {
 	mu    sync.Mutex
 	state State
 	now   func() time.Time
+	sleep func(time.Duration)
 }
 
 type Option func(*Controller)
@@ -102,6 +109,16 @@ func WithPrometheusAPIHandler(h http.Handler) Option {
 	return func(c *Controller) { c.prometheusAPIProxy = h }
 }
 
+// WithRolloutVerifier supplies the Kubernetes rollout tracker used by Verify.
+func WithRolloutVerifier(rv RolloutVerifier) Option {
+	return func(c *Controller) { c.rollout = rv }
+}
+
+// WithSleep overrides the verification window wait (tests only).
+func WithSleep(sleep func(time.Duration)) Option {
+	return func(c *Controller) { c.sleep = sleep }
+}
+
 func New(cfg config.Config, engine *policy.Engine, snapshots SnapshotProvider, replicas ReplicaReader, recorder Recorder, approvalSecret []byte, opts ...Option) (*Controller, error) {
 	state, err := loadState(cfg.Controller.StatePath)
 	if err != nil {
@@ -116,11 +133,82 @@ func New(cfg config.Config, engine *policy.Engine, snapshots SnapshotProvider, r
 		approvalSecret: approvalSecret,
 		state:          state,
 		now:            time.Now,
+		sleep:          time.Sleep,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
+	if rv, ok := replicas.(RolloutVerifier); ok {
+		c.rollout = rv
+	}
 	return c, nil
+}
+
+// Verify waits for the post-scale rollout, observes the verification window,
+// re-queries SigNoz, and classifies whether the action recovered service health.
+func (c *Controller) Verify(ctx context.Context, before model.Snapshot, rec model.Recommendation) (model.Verification, error) {
+	if c.rollout == nil {
+		return model.Verification{}, fmt.Errorf("rollout verifier is not configured")
+	}
+
+	target, err := c.rollout.Target(ctx)
+	if err != nil {
+		return model.Verification{}, fmt.Errorf("read rollout target: %w", err)
+	}
+
+	if err := c.rollout.WaitForRollout(ctx, target.Generation, 0); err != nil {
+		verification := model.Verification{
+			RecommendationID: rec.ID,
+			BeforeSLI:      before.SLI,
+			BeforeP95MS:    before.P95MS,
+			BeforeErrorRate: before.ErrorRate,
+			Result:         "rollout_failed",
+		}
+		c.recorder.RecordIncidentReport(rec, verification, before.CurrentReplicas, target.DesiredReplicas)
+		return verification, nil
+	}
+
+	if window := c.cfg.Controller.VerificationWindow; window > 0 {
+		if c.sleep != nil {
+			c.sleep(window)
+		}
+	}
+
+	afterTarget, err := c.rollout.Target(ctx)
+	if err != nil {
+		return model.Verification{}, fmt.Errorf("read post-rollout target: %w", err)
+	}
+
+	after, err := c.snapshots.Snapshot(ctx, c.cfg, afterTarget.DesiredReplicas)
+	if err != nil {
+		return model.Verification{}, fmt.Errorf("post-action snapshot: %w", err)
+	}
+
+	verification := model.Verification{
+		RecommendationID: rec.ID,
+		BeforeSLI:      before.SLI,
+		AfterSLI:         after.SLI,
+		BeforeP95MS:      before.P95MS,
+		AfterP95MS:       after.P95MS,
+		BeforeErrorRate:  before.ErrorRate,
+		AfterErrorRate:   after.ErrorRate,
+		Result:           classifyVerification(before, after, c.cfg.Signals.SLIObjective),
+	}
+	c.recorder.RecordIncidentReport(rec, verification, before.CurrentReplicas, afterTarget.DesiredReplicas)
+	return verification, nil
+}
+
+func classifyVerification(before, after model.Snapshot, objective float64) string {
+	latencyWorsened := after.P95MS > before.P95MS
+	errorsWorsened := after.ErrorRate > before.ErrorRate
+
+	if after.SLI >= objective && !latencyWorsened && !errorsWorsened {
+		return "recovered"
+	}
+	if after.SLI > before.SLI && after.SLI < objective {
+		return "improved"
+	}
+	return "ineffective"
 }
 
 // Evaluate runs one iteration of the control loop: read current replicas,
@@ -128,11 +216,17 @@ func New(cfg config.Config, engine *policy.Engine, snapshots SnapshotProvider, r
 // a scale change (automatic mode), or wait for approval.
 func (c *Controller) Evaluate(ctx context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+
+	var verifyAfter struct {
+		run    bool
+		before model.Snapshot
+		rec    model.Recommendation
+	}
 
 	status, err := c.replicas.Replicas(ctx)
 	if err != nil {
 		c.recorder.Heartbeat()
+		c.mu.Unlock()
 		return fmt.Errorf("read current replicas: %w", err)
 	}
 	replicas := status.Current
@@ -147,12 +241,15 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 		c.state.PublishedReplicas = replicas
 		c.recorder.RecordPublishedReplicas(replicas)
 		c.recorder.Heartbeat()
-		return c.persistStateLocked()
+		err = c.persistStateLocked()
+		c.mu.Unlock()
+		return err
 	}
 	snapshot.Available = status.Available
 
 	rec := c.engine.Evaluate(snapshot, now)
 	c.state.LastRecommendation = rec
+	c.state.LastSnapshot = snapshot
 	c.recorder.RecordRecommendation(rec)
 	c.recorder.RecordDecision(rec)
 
@@ -167,7 +264,11 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 		c.state.PublishedReplicas = replicas
 	case model.DecisionScaleUp, model.DecisionScaleDown:
 		if c.cfg.Controller.Mode == "automatic" {
-			c.executeLocked(rec, now)
+			if c.executeLocked(rec, now) {
+				verifyAfter.run = true
+				verifyAfter.before = snapshot
+				verifyAfter.rec = rec
+			}
 		}
 		// dry-run: never publish a scale change.
 		// approval: hold until POST /api/actions/{id}/approve.
@@ -175,12 +276,40 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 
 	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
 	c.recorder.Heartbeat()
+	if err := c.persistStateLocked(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	if verifyAfter.run {
+		if err := c.verifyAfterAction(ctx, verifyAfter.before, verifyAfter.rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) verifyAfterAction(ctx context.Context, before model.Snapshot, rec model.Recommendation) error {
+	if c.rollout == nil {
+		return nil
+	}
+	verification, err := c.Verify(ctx, before, rec)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state.LastAction.RecommendationID != rec.ID {
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("post-scale verification: %w", err)
+	}
+	c.state.LastVerification = verification
 	return c.persistStateLocked()
 }
 
-func (c *Controller) executeLocked(rec model.Recommendation, now time.Time) {
+func (c *Controller) executeLocked(rec model.Recommendation, now time.Time) bool {
 	if c.state.LastAction.RecommendationID == rec.ID && !c.state.LastAction.CompletedAt.IsZero() {
-		return // never execute the same recommendation twice.
+		return false // never execute the same recommendation twice.
 	}
 	c.state.PublishedReplicas = rec.RecommendedReplicas
 	c.state.LastAction = model.Action{
@@ -190,27 +319,34 @@ func (c *Controller) executeLocked(rec model.Recommendation, now time.Time) {
 		Result:           "published_desired_replicas",
 	}
 	c.engine.RecordAction(now)
+	return true
 }
 
 // Approve executes a pending scaling recommendation once its signed token
 // verifies, it has not expired, and it has not already been executed.
 func (c *Controller) Approve(ctx context.Context, id, token, operator string, now time.Time) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	rec := c.state.LastRecommendation
 	if rec.ID != id {
+		c.mu.Unlock()
 		return fmt.Errorf("unknown or superseded recommendation %q", id)
 	}
 	if rec.Decision != model.DecisionScaleUp && rec.Decision != model.DecisionScaleDown {
+		c.mu.Unlock()
 		return fmt.Errorf("recommendation %q is not an executable scaling action", id)
 	}
 	if c.state.LastAction.RecommendationID == id && !c.state.LastAction.CompletedAt.IsZero() {
+		c.mu.Unlock()
 		return nil // idempotent: already approved and executed.
 	}
 	if err := VerifyApproval(c.approvalSecret, token, id, now); err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("verify approval: %w", err)
 	}
+
+	beforeSnapshot := c.state.LastSnapshot
+	recCopy := rec
 
 	c.state.PublishedReplicas = rec.RecommendedReplicas
 	c.state.LastAction = model.Action{
@@ -223,7 +359,13 @@ func (c *Controller) Approve(ctx context.Context, id, token, operator string, no
 	}
 	c.engine.RecordAction(now)
 	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
-	return c.persistStateLocked()
+	if err := c.persistStateLocked(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	return c.verifyAfterAction(ctx, beforeSnapshot, recCopy)
 }
 
 func (c *Controller) PublishedReplicas() int32 {

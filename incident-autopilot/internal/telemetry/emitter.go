@@ -222,6 +222,28 @@ func (e *Emitter) RecordDecision(rec model.Recommendation) {
 	e.logger.Emit(context.Background(), record)
 }
 
+// RecordIncidentReport emits a structured OTLP log summarizing the outcome of
+// a completed scaling action and its post-action verification.
+func (e *Emitter) RecordIncidentReport(rec model.Recommendation, verification model.Verification, beforeReplicas, afterReplicas int32) {
+	if e.logger == nil {
+		return
+	}
+	var record otellog.Record
+	record.SetSeverity(otellog.SeverityInfo)
+	record.AddAttributes(
+		otellog.String("event.name", "autopilot.incident_report"),
+		otellog.String("service.name", e.cfg.Target.Service),
+		otellog.String("autopilot.recommendation_id", verification.RecommendationID),
+		otellog.String("autopilot.action", string(rec.Decision)),
+		otellog.String("autopilot.result", verification.Result),
+		otellog.Float64("autopilot.before.sli", verification.BeforeSLI),
+		otellog.Float64("autopilot.after.sli", verification.AfterSLI),
+		otellog.Int64("autopilot.before.replicas", int64(beforeReplicas)),
+		otellog.Int64("autopilot.after.replicas", int64(afterReplicas)),
+	)
+	e.logger.Emit(context.Background(), record)
+}
+
 func (e *Emitter) Heartbeat() {
 	e.heartbeat.Set(float64(time.Now().Unix()))
 }

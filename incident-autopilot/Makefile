@@ -1,10 +1,18 @@
-.PHONY: build test vet
+# Use the repository root Makefile for all commands.
+# Example: cd .. && make autopilot
 
-build:
-	go build -o bin/autopilot ./cmd/autopilot
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
-test:
-	go test ./...
+.DEFAULT_GOAL := help
 
-vet:
-	go vet ./...
+.PHONY: help build test vet autopilot-build autopilot-test autopilot-vet
+
+help:
+	@$(MAKE) -C $(ROOT) help
+
+build: autopilot-build
+test: autopilot-test
+vet: autopilot-vet
+
+autopilot-build autopilot-test autopilot-vet:
+	@$(MAKE) -C $(ROOT) $@
