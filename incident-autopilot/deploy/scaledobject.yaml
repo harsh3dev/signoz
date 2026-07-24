@@ -1,0 +1,39 @@
+# Contract: publishing autopilot_recommended_replicas=N on the Autopilot's
+# /metrics endpoint must result in checkout-api's HPA desired replica count
+# becoming N (bounded by min/max below). Dry-run and unapproved
+# recommendations never change this metric's value, so replicas stay put.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: checkout-api-autopilot
+  namespace: autopilot-demo
+spec:
+  scaleTargetRef:
+    name: checkout-api
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 180
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+  triggers:
+    - type: prometheus
+      metricType: Value
+      metadata:
+        serverAddress: http://incident-autopilot.autopilot-demo.svc:8080
+        metricName: autopilot_recommended_replicas
+        query: autopilot_recommended_replicas
+        threshold: "1"
