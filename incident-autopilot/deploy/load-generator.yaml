@@ -46,6 +46,7 @@ spec:
       containers:
         - name: k6
           image: grafana/k6:0.57.0
+          imagePullPolicy: IfNotPresent
           args: ["run", "/scripts/script.js"]
           env:
             - name: K6_VUS

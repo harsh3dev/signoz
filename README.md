@@ -1193,7 +1193,7 @@ git commit -m "feat: add approved unhealthy pod replacement"
 - Produces: `installer.EnsureAlerts(ctx, channel string) error`
 - Produces: CLI command `autopilot install`
 
-- [ ] **Step 1: Write installer idempotency tests**
+- [x] **Step 1: Write installer idempotency tests**
 
 Use `httptest.Server` and assert:
 
@@ -1203,7 +1203,7 @@ Use `httptest.Server` and assert:
 - Notification channel must already exist; the installer never creates a fake
   no-op channel.
 
-- [ ] **Step 2: Build the dashboard**
+- [x] **Step 2: Build the dashboard**
 
 Generate panels for:
 
@@ -1218,7 +1218,7 @@ Generate panels for:
 
 Use exact metric names emitted in Task 5 and stable widget IDs.
 
-- [ ] **Step 3: Build human-facing alerts**
+- [x] **Step 3: Build human-facing alerts**
 
 Generate threshold alerts for:
 
@@ -1230,7 +1230,7 @@ Generate threshold alerts for:
 
 Alert annotations must link to the approval UI and the generated dashboard.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 go test ./internal/installer -v
@@ -1241,8 +1241,11 @@ Expected: PASS.
 - [ ] **Step 5: Run against stock SigNoz twice**
 
 ```bash
-./bin/autopilot install --config config.yaml --channel hackathon-email
-./bin/autopilot install --config config.yaml --channel hackathon-email
+make autopilot-build
+cd incident-autopilot
+export SIGNOZ_API_KEY=<your-service-account-api-key>
+./bin/autopilot install --config config.local.yaml --channel hackathon-email
+./bin/autopilot install --config config.local.yaml --channel hackathon-email
 ```
 
 Expected: exactly one dashboard and one copy of each alert after both runs.
@@ -1340,7 +1343,7 @@ Document:
 - Recovery commands.
 - Troubleshooting for OTLP, KEDA, HPA, readiness gates, and EndpointSlices.
 
-- [ ] **Step 5: Ignore local visual and runtime state**
+- [x] **Step 5: Ignore local visual and runtime state**
 
 Append:
 

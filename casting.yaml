@@ -2,7 +2,22 @@ apiVersion: v1alpha1
 kind: Installation
 metadata:
   name: signoz
+  labels:
+    demo.stack: incident-autopilot
 spec:
   deployment:
     flavor: compose
     mode: docker
+  mcp:
+    spec:
+      enabled: true
+  demo:
+    incidentAutopilot:
+      docs: incident-autopilot/DEMO.md
+      kindCluster: autopilot
+      kubernetesNamespace: autopilot-demo
+      targets:
+        - checkout-api
+      workflows:
+        - make -C incident-autopilot demo-capacity
+        - make -C incident-autopilot demo-bad-pod

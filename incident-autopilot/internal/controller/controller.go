@@ -10,11 +10,12 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -668,13 +669,45 @@ func VerifyApproval(secret []byte, token, id string, now time.Time) error {
 	return nil
 }
 
+//go:embed ui/dist/*
+var uiFS embed.FS
+
 // Router exposes the approval UI, approval API, and (if configured) the
 // Prometheus metrics endpoint KEDA scrapes for the desired-replica signal.
 func (c *Controller) Router() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /actions/latest", c.handleLatest)
-	mux.HandleFunc("GET /actions/{id}", c.handleShowAction)
+	
+	// API endpoints
+	mux.HandleFunc("GET /api/actions/{id}", c.handleGetActionAPI)
 	mux.HandleFunc("POST /api/actions/{id}/approve", c.handleApprove)
+	
+	// Serve React App
+	distFS, err := fs.Sub(uiFS, "ui/dist")
+	if err != nil {
+		panic(err)
+	}
+	fileServer := http.FileServer(http.FS(distFS))
+	
+	mux.HandleFunc("GET /actions/latest", c.handleLatest)
+	
+	// Serve static assets and favicon
+	mux.Handle("GET /assets/", fileServer)
+	mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = "/favicon.svg"
+		fileServer.ServeHTTP(w, r)
+	})
+	
+	// Serve index.html for all other /actions/ routes to let React handle it
+	mux.HandleFunc("GET /actions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		data, err := fs.ReadFile(distFS, "index.html")
+		if err != nil {
+			http.Error(w, "UI not found", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+	})
+
 	if c.metricsHandler != nil {
 		mux.Handle("GET /metrics", c.metricsHandler)
 	}
@@ -682,6 +715,31 @@ func (c *Controller) Router() http.Handler {
 		mux.Handle("GET /api/v1/query", c.prometheusAPIProxy)
 	}
 	return mux
+}
+
+func (c *Controller) handleGetActionAPI(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rec := c.PendingRecommendation()
+	if rec.ID != id {
+		http.Error(w, "recommendation not found or superseded", http.StatusNotFound)
+		return
+	}
+	token := SignApproval(c.approvalSecret, rec.ID, rec.ExpiresAt)
+	
+	response := map[string]interface{}{
+		"id": rec.ID,
+		"decision": rec.Decision,
+		"currentReplicas": rec.CurrentReplicas,
+		"recommendedReplicas": rec.RecommendedReplicas,
+		"targetPod": rec.TargetPod,
+		"reason": rec.Reason,
+		"expiresAt": rec.ExpiresAt,
+		"token": token,
+		"secret": string(c.approvalSecret), // Only for demo purposes as in the original HTML
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func (c *Controller) handleLatest(w http.ResponseWriter, r *http.Request) {
@@ -693,68 +751,6 @@ func (c *Controller) handleLatest(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/actions/"+rec.ID, http.StatusFound)
 }
 
-const approvalPageTemplate = `<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>Incident Autopilot: approve action</title></head>
-<body>
-<h1>Recommendation %s</h1>
-<p><strong>Decision:</strong> %s</p>
-<p><strong>Current replicas:</strong> %d &rarr; <strong>Recommended replicas:</strong> %d</p>
-%s
-<p><strong>Reason:</strong> %s</p>
-<p><strong>Expires at:</strong> %s</p>
-<form method="post" action="/api/actions/%s/approve" onsubmit="return submitApproval(event)">
-  <input type="hidden" name="token" value="%s">
-  <label>Operator name: <input type="text" name="operator" required></label>
-  <button type="submit">Approve</button>
-</form>
-<script>
-function submitApproval(event) {
-  event.preventDefault();
-  var form = event.target;
-  var data = new FormData(form);
-  fetch(form.action, {
-    method: 'POST',
-    headers: {'Authorization': 'Bearer %s', 'X-Autopilot-Operator': data.get('operator')},
-    body: new URLSearchParams({token: data.get('token')}),
-  }).then(function (res) {
-    return res.text();
-  }).then(function (body) {
-    document.body.insertAdjacentHTML('beforeend', '<pre>' + body + '</pre>');
-  });
-  return false;
-}
-</script>
-</body>
-</html>
-`
-
-func (c *Controller) handleShowAction(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rec := c.PendingRecommendation()
-	if rec.ID != id {
-		http.Error(w, "recommendation not found or superseded", http.StatusNotFound)
-		return
-	}
-	token := SignApproval(c.approvalSecret, rec.ID, rec.ExpiresAt)
-	targetPodLine := ""
-	if rec.TargetPod != "" {
-		targetPodLine = fmt.Sprintf("<p><strong>Target pod:</strong> %s</p>", html.EscapeString(rec.TargetPod))
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, approvalPageTemplate,
-		html.EscapeString(rec.ID),
-		html.EscapeString(string(rec.Decision)),
-		rec.CurrentReplicas,
-		rec.RecommendedReplicas,
-		targetPodLine,
-		html.EscapeString(rec.Reason),
-		rec.ExpiresAt.Format(time.RFC3339),
-		html.EscapeString(rec.ID),
-		html.EscapeString(token),
-		html.EscapeString(string(c.approvalSecret)),
-	)
-}
 
 func (c *Controller) handleApprove(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

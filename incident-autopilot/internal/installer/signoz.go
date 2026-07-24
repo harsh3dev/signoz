@@ -236,8 +236,8 @@ func (i *Installer) buildDashboard(title string) map[string]any {
 func (i *Installer) podOutlierQuery() string {
 	service := i.cfg.Target.Service
 	return fmt.Sprintf(
-		`sum by (k8s_pod_name) (rate(checkout_requests_total{service_name=%q,status="failed"}[5m])) / sum by (k8s_pod_name) (rate(checkout_requests_total{service_name=%q}[5m]))`,
-		service, service,
+		`(sum by ("k8s.pod.name") (rate(checkout_requests_total{"service.name"=%q,status="failed"}[5m])) or sum by ("k8s.pod.name") (rate(checkout_requests_total{"service.name"=%q,status="success"}[5m])) * 0) / sum by ("k8s.pod.name") (rate(checkout_requests_total{"service.name"=%q,status="success"}[5m]))`,
+		service, service, service,
 	)
 }
 
@@ -730,7 +730,7 @@ func (i *Installer) doJSON(ctx context.Context, method, path string, body any, o
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
-	if resp.StatusCode != okStatus {
+	if !isExpectedStatus(resp.StatusCode, okStatus) {
 		return fmt.Errorf("request %s %s returned status %d: %s", method, path, resp.StatusCode, string(respBody))
 	}
 	if out == nil || len(respBody) == 0 {
@@ -740,4 +740,17 @@ func (i *Installer) doJSON(ctx context.Context, method, path string, body any, o
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+// isExpectedStatus reports whether got is an acceptable HTTP status for a
+// request that expected want. SigNoz returns 204 No Content for some
+// successful PUT updates (alerts, dashboards).
+func isExpectedStatus(got, want int) bool {
+	if got == want {
+		return true
+	}
+	if want == http.StatusOK && got == http.StatusNoContent {
+		return true
+	}
+	return false
 }

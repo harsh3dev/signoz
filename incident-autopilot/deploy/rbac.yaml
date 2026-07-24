@@ -25,7 +25,7 @@ rules:
   # quarantine only touches pods/status, never pod spec).
   - apiGroups: [""]
     resources: ["pods/status"]
-    verbs: ["patch"]
+    verbs: ["patch", "update"]
   # Delete a quarantined pod only after an approved replacement is ready and
   # traffic has drained. No wildcard verbs; no deployment/replicaset writes.
   - apiGroups: [""]

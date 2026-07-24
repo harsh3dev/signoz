@@ -157,7 +157,7 @@ func TestExpandPodQueryInjectsValidatedPodName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expected := `sum(rate(checkout_requests_total{k8s_pod_name="checkout-api-abc123"}[5m]))`
+	expected := `sum(rate(checkout_requests_total{"k8s.pod.name"="checkout-api-abc123"}[5m]))`
 	if query != expected {
 		t.Fatalf("expected %q, got %q", expected, query)
 	}

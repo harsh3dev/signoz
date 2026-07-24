@@ -8,12 +8,12 @@ target:
   deployment: checkout-api
   readiness_gate: autopilot.signoz.io/healthy
 signals:
-  request_rate_query: sum(rate(checkout_requests_total{service_name="checkout-api"}[2m]))
-  p95_latency_query: histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{service_name="checkout-api"}[2m])))
-  error_rate_query: sum(rate(checkout_requests_total{service_name="checkout-api",status="failed"}[2m])) / sum(rate(checkout_requests_total{service_name="checkout-api"}[2m]))
-  sli_query: 1 - (sum(rate(checkout_requests_total{service_name="checkout-api",status="failed"}[5m])) / sum(rate(checkout_requests_total{service_name="checkout-api"}[5m])))
+  request_rate_query: sum(rate(checkout_requests_total{"service.name"="checkout-api"}[2m]))
+  p95_latency_query: (histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{"service.name"="checkout-api"}[2m]))) or vector(0))
+  error_rate_query: (sum(rate(checkout_requests_total{"service.name"="checkout-api",status="failed"}[2m])) or sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[2m])) * 0) / sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[2m]))
+  sli_query: 1 - ((sum(rate(checkout_requests_total{"service.name"="checkout-api",status="failed"}[5m])) or sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[5m])) * 0) / sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[5m])))
   sli_objective: 0.99
-  freshness_limit: 60s
+  freshness_limit: 180s
 policy:
   min_replicas: 2
   max_replicas: 10

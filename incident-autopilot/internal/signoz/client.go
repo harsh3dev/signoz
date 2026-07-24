@@ -102,7 +102,7 @@ func (c *Client) QueryScalar(ctx context.Context, query string, start, end time.
 		SchemaVersion: "v1",
 		Start:         start.UnixMilli(),
 		End:           end.UnixMilli(),
-		RequestType:   "scalar",
+		RequestType:   "time_series",
 	}
 	q := promQLQuery{Type: "promql"}
 	q.Spec.Name = queryName
@@ -257,6 +257,65 @@ func ExpandPodQuery(baseQuery, podName string) (string, error) {
 	if !strings.Contains(baseQuery, podFilterMarker) {
 		return "", fmt.Errorf("query is missing the %s marker", podFilterMarker)
 	}
-	filter := fmt.Sprintf(`k8s_pod_name="%s"`, podName)
+	filter := fmt.Sprintf(`"k8s.pod.name"="%s"`, podName)
 	return strings.ReplaceAll(baseQuery, podFilterMarker, filter), nil
+}
+
+// EnrichPodSnapshots attaches per-pod request, latency, and error signals used
+// by the policy engine's outlier detector.
+func (c *Client) EnrichPodSnapshots(ctx context.Context, cfg config.Config, snap model.Snapshot, podNames []string) (model.Snapshot, error) {
+	if len(podNames) == 0 {
+		return snap, nil
+	}
+	now := time.Now()
+	start := now.Add(-5 * time.Minute)
+	service := cfg.Target.Service
+
+	pods := make([]model.PodSnapshot, 0, len(podNames))
+	for _, podName := range podNames {
+		rrQuery, err := ExpandPodQuery(
+			fmt.Sprintf(`sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER}}[2m]))`, service),
+			podName,
+		)
+		if err != nil {
+			return snap, err
+		}
+		errQuery, err := ExpandPodQuery(
+			fmt.Sprintf(`(sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="failed"}[2m])) or sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="success"}[2m])) * 0) / sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="success"}[2m]))`, service, service, service),
+			podName,
+		)
+		if err != nil {
+			return snap, err
+		}
+		p95Query, err := ExpandPodQuery(
+			fmt.Sprintf(`(histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{"service.name"=%q,${POD_FILTER}}[2m]))) or vector(0))`, service),
+			podName,
+		)
+		if err != nil {
+			return snap, err
+		}
+
+		rr, err := c.QueryScalar(ctx, rrQuery, start, now)
+		if err != nil {
+			continue
+		}
+		er, err := c.QueryScalar(ctx, errQuery, start, now)
+		if err != nil {
+			continue
+		}
+		p95, err := c.QueryScalar(ctx, p95Query, start, now)
+		if err != nil {
+			continue
+		}
+
+		pods = append(pods, model.PodSnapshot{
+			Name:        podName,
+			RequestRate: rr.Value,
+			P95MS:       p95.Value,
+			ErrorRate:   er.Value,
+			Ready:       true,
+		})
+	}
+	snap.Pods = pods
+	return snap, nil
 }

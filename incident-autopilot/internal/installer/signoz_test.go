@@ -20,10 +20,10 @@ func testConfig() config.Config {
 	cfg.Target.Service = "checkout-api"
 	cfg.Target.Namespace = "autopilot-demo"
 	cfg.Target.Deployment = "checkout-api"
-	cfg.Signals.RequestRateQuery = `sum(rate(checkout_requests_total{service_name="checkout-api"}[2m]))`
-	cfg.Signals.P95LatencyQuery = `histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{service_name="checkout-api"}[2m])))`
-	cfg.Signals.ErrorRateQuery = `sum(rate(checkout_requests_total{service_name="checkout-api",status="failed"}[2m])) / sum(rate(checkout_requests_total{service_name="checkout-api"}[2m]))`
-	cfg.Signals.SLIQuery = `1 - (sum(rate(checkout_requests_total{service_name="checkout-api",status="failed"}[5m])) / sum(rate(checkout_requests_total{service_name="checkout-api"}[5m])))`
+	cfg.Signals.RequestRateQuery = `sum(rate(checkout_requests_total{"service.name"="checkout-api"}[2m]))`
+	cfg.Signals.P95LatencyQuery = `(histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{"service.name"="checkout-api"}[2m]))) or vector(0))`
+	cfg.Signals.ErrorRateQuery = `(sum(rate(checkout_requests_total{"service.name"="checkout-api",status="failed"}[2m])) or sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[2m])) * 0) / sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[2m]))`
+	cfg.Signals.SLIQuery = `1 - ((sum(rate(checkout_requests_total{"service.name"="checkout-api",status="failed"}[5m])) or sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[5m])) * 0) / sum(rate(checkout_requests_total{"service.name"="checkout-api",status="success"}[5m])))`
 	cfg.Signals.SLIObjective = 0.99
 	cfg.Signals.FreshnessLimit = 60 * time.Second
 	cfg.Policy.MinReplicas = 2
@@ -189,8 +189,7 @@ func TestEnsureAlertsUpdatesExistingRuleWhenThresholdChanges(t *testing.T) {
 			mu.Lock()
 			updateRules++
 			mu.Unlock()
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"status":"success","data":{"id":"rule-1"}}`))
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}

@@ -112,6 +112,7 @@ func runController(args []string) {
 	if err != nil {
 		log.Fatalf("build kubernetes client: %v", err)
 	}
+	snapshotProvider := &signoz.Bridge{Client: signozClient, Kube: kubeClient}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -143,7 +144,7 @@ func runController(args []string) {
 	}
 
 	engine := policy.New(cfg)
-	ctrl, err := controller.New(cfg, engine, signozClient, kubeClient, emitter, approvalSecret,
+	ctrl, err := controller.New(cfg, engine, snapshotProvider, kubeClient, emitter, approvalSecret,
 		controller.WithMetricsHandler(emitter.Handler()),
 		controller.WithPrometheusAPIHandler(emitter.InstantQueryHandler()))
 	if err != nil {
