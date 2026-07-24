@@ -4,6 +4,7 @@
 .PHONY: demo-install demo demo-build
 .PHONY: autopilot-build autopilot-test autopilot-vet autopilot-run
 .PHONY: test cluster cluster-delete k8s-setup k8s-install-keda k8s-build-images k8s-deploy k8s-load physical-verify physical-quarantine-verify clean
+.PHONY: demo-ready demo-load demo-cleanup
 
 # Repository layout
 ROOT            := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
@@ -195,3 +196,28 @@ clean: ## Remove local build artifacts
 	rm -rf $(AUTOPILOT_DIR)/bin
 	rm -rf $(DEMO_DIR)/node_modules
 	rm -rf $(AUTOPILOT_DIR)/.state
+
+demo-ready: ## Phases 1-7: SigNoz up, cluster+KEDA, build+deploy, secrets, clean baseline
+	$(AUTOPILOT_DIR)/scripts/test-e2e.sh setup
+	kubectl -n autopilot-demo delete job load-generator --ignore-not-found
+	kubectl -n autopilot-demo scale deployment/checkout-api --replicas=2
+	kubectl -n autopilot-demo rollout status deployment/checkout-api --timeout=120s
+	@echo ""
+	@echo "Baseline ready. Next: make demo-load"
+
+demo-load: ## Phase 8: port-forward autopilot UI + start load/incident, prints approval URL
+	@if ! curl -sf http://127.0.0.1:18080/metrics >/dev/null 2>&1; then \
+		echo "==> starting port-forward on :18080"; \
+		nohup kubectl -n autopilot-demo port-forward svc/incident-autopilot 18080:8080 >/tmp/autopilot-pf.log 2>&1 & \
+		sleep 2; \
+	else \
+		echo "==> port-forward already up"; \
+	fi
+	$(AUTOPILOT_DIR)/scripts/load.sh
+	@echo ""
+	@echo "Approve at: http://127.0.0.1:18080/actions/latest"
+
+demo-cleanup: ## Phase 11: stop load, reset baseline to 2 replicas
+	kubectl -n autopilot-demo delete job load-generator --ignore-not-found
+	kubectl -n autopilot-demo scale deployment/checkout-api --replicas=2
+	kubectl -n autopilot-demo rollout status deployment/checkout-api --timeout=120s
