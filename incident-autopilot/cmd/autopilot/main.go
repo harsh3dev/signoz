@@ -25,6 +25,7 @@ import (
 
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/config"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/controller"
+	"github.com/harsh3dev/signoz/incident-autopilot/internal/installer"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/policy"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/signoz"
@@ -32,12 +33,62 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the autopilot configuration file")
-	listenAddr := flag.String("listen-addr", ":8080", "address to serve the approval UI/API and /metrics on")
-	kubeconfig := flag.String("kubeconfig", "", "path to a kubeconfig file; defaults to in-cluster config")
-	approvalSecretEnv := flag.String("approval-secret-env", "AUTOPILOT_APPROVAL_SECRET", "environment variable holding the approval HMAC/bearer secret")
-	otlpEndpoint := flag.String("otlp-endpoint", "", "SigNoz OTLP HTTP endpoint for controller metrics/logs (e.g. http://host.docker.internal:4318); leave empty to disable")
-	flag.Parse()
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		runInstall(os.Args[2:])
+		return
+	}
+	runController(os.Args[1:])
+}
+
+func runInstall(args []string) {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to the autopilot configuration file")
+	channel := fs.String("channel", "", "existing SigNoz notification channel name")
+	approvalURL := fs.String("approval-url", "http://localhost:8080", "base URL for the approval UI")
+	if err := fs.Parse(args); err != nil {
+		log.Fatalf("parse install flags: %v", err)
+	}
+	if *channel == "" {
+		log.Fatal("install requires --channel")
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+	apiKey := ""
+	if cfg.SigNoz.APIKeyEnv != "" {
+		apiKey = os.Getenv(cfg.SigNoz.APIKeyEnv)
+	}
+	if apiKey == "" {
+		log.Fatalf("SigNoz API key is required: set %s", cfg.SigNoz.APIKeyEnv)
+	}
+
+	inst := installer.New(cfg, apiKey, *approvalURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dashboardURL, err := inst.EnsureDashboard(ctx)
+	if err != nil {
+		log.Fatalf("install dashboard: %v", err)
+	}
+	if err := inst.EnsureAlerts(ctx, *channel); err != nil {
+		log.Fatalf("install alerts: %v", err)
+	}
+	log.Printf("installed Incident Autopilot dashboard: %s", dashboardURL)
+	log.Printf("installed alerts routed to channel %q", *channel)
+}
+
+func runController(args []string) {
+	fs := flag.NewFlagSet("autopilot", flag.ExitOnError)
+	configPath := fs.String("config", "config.yaml", "path to the autopilot configuration file")
+	listenAddr := fs.String("listen-addr", ":8080", "address to serve the approval UI/API and /metrics on")
+	kubeconfig := fs.String("kubeconfig", "", "path to a kubeconfig file; defaults to in-cluster config")
+	approvalSecretEnv := fs.String("approval-secret-env", "AUTOPILOT_APPROVAL_SECRET", "environment variable holding the approval HMAC/bearer secret")
+	otlpEndpoint := fs.String("otlp-endpoint", "", "SigNoz OTLP HTTP endpoint for controller metrics/logs (e.g. http://host.docker.internal:4318); leave empty to disable")
+	if err := fs.Parse(args); err != nil {
+		log.Fatalf("parse flags: %v", err)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
