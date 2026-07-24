@@ -582,7 +582,7 @@ Create `incident-autopilot/deploy/load-generator.yaml` using
 `grafana/k6:0.57.0`. Mount a script that sends valid checkout requests and
 supports `K6_VUS` and `K6_DURATION`.
 
-- [ ] **Step 6: Build and smoke-test in Kind**
+- [x] **Step 6: Build and smoke-test in Kind**
 
 Run:
 
@@ -983,7 +983,7 @@ The integration contract for the MVP is exact: publishing
 of six. The integration test below is a release gate; do not continue to the
 demo if it fails.
 
-- [ ] **Step 4: Test dry-run and approval modes**
+- [x] **Step 4: Test dry-run and approval modes**
 
 Run:
 
@@ -1081,7 +1081,7 @@ go test ./internal/kube ./internal/controller ./internal/telemetry -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit verification**
+- [x] **Step 6: Commit verification**
 
 ```bash
 git add incident-autopilot/internal
@@ -1103,7 +1103,7 @@ git commit -m "feat: verify scaling recovery and report incidents"
 - Produces: `kube.Client.WaitUntilNotRouted(ctx, podUID, timeout) error`
 - Produces: `kube.Client.DeleteOwnedPod(ctx, podName, podUID) error`
 
-- [ ] **Step 1: Write quarantine safety tests**
+- [x] **Step 1: Write quarantine safety tests**
 
 Cover:
 
@@ -1115,7 +1115,7 @@ func TestReplacementFailurePreservesQuarantinedPod(t *testing.T)
 func TestExpiredPodApprovalDoesNothing(t *testing.T)
 ```
 
-- [ ] **Step 2: Patch only the custom readiness condition**
+- [x] **Step 2: Patch only the custom readiness condition**
 
 Modify `incident-autopilot/deploy/demo-app.yaml` to add:
 
@@ -1144,13 +1144,13 @@ corev1.PodCondition{
 }
 ```
 
-- [ ] **Step 3: Verify traffic drain**
+- [x] **Step 3: Verify traffic drain**
 
 Watch EndpointSlices selected by the Service. Proceed only when no endpoint with
 the target pod UID is ready or serving. Timeout must abort without deleting the
 pod.
 
-- [ ] **Step 4: Add replacement capacity and delete safely**
+- [x] **Step 4: Add replacement capacity and delete safely**
 
 Publish `currentReplicas + 1` through the approved KEDA recommendation, wait for
 a new owned Pod to become ready, then delete the quarantined Pod using a UID
@@ -1164,7 +1164,7 @@ opts := metav1.DeleteOptions{
 
 After verification and cooldown, return to the normal policy recommendation.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 ```bash
 go test ./internal/kube ./internal/controller ./internal/policy -v
@@ -1172,7 +1172,7 @@ go test ./internal/kube ./internal/controller ./internal/policy -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit pod remediation**
+- [x] **Step 6: Commit pod remediation**
 
 ```bash
 git add incident-autopilot/internal

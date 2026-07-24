@@ -20,6 +20,8 @@ spec:
       labels:
         app: checkout-api
     spec:
+      readinessGates:
+        - conditionType: autopilot.signoz.io/healthy
       containers:
         - name: checkout-api
           image: telemetry-shop:dev

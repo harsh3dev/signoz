@@ -83,6 +83,9 @@ target/
 *.exe
 *.out
 
+# ClickHouse user scripts (platform-specific binaries)
+pours/deployment/telemetrystore/user-scripts/histogramQuantile
+
 # =========================
 # Go
 # =========================

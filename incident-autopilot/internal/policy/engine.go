@@ -87,6 +87,11 @@ func (e *Engine) Evaluate(s model.Snapshot, now time.Time) model.Recommendation 
 		if e.outlierRuns[outlierPod.Name] >= e.cfg.Policy.PodOutlier.ConsecutiveEvaluations {
 			rec.Decision = model.DecisionQuarantine
 			rec.TargetPod = outlierPod.Name
+			rec.RecommendedReplicas = clampReplicas(
+				s.CurrentReplicas+1,
+				e.cfg.Policy.MinReplicas,
+				e.cfg.Policy.MaxReplicas,
+			)
 			rec.Confidence = 0.9
 			rec.Reason = fmt.Sprintf(
 				"Pod outlier: %s error rate %.2f%% and P95 latency %.0fms diverge sharply from peers across %d consecutive evaluations.",

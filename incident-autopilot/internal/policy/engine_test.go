@@ -108,6 +108,9 @@ func TestOnePodOutlierRecommendsQuarantine(t *testing.T) {
 	if second.TargetPod != "checkout-api-ccc" {
 		t.Fatalf("expected target pod checkout-api-ccc, got %q", second.TargetPod)
 	}
+	if second.RecommendedReplicas != 4 {
+		t.Fatalf("expected replacement capacity of 4 replicas, got %d", second.RecommendedReplicas)
+	}
 }
 
 func TestMissingAvailabilityReturnsIndeterminate(t *testing.T) {

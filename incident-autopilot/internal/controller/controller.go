@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/config"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/model"
@@ -47,6 +49,22 @@ type ReplicaReader interface {
 type RolloutVerifier interface {
 	Target(ctx context.Context) (kube.TargetState, error)
 	WaitForRollout(ctx context.Context, generation int64, timeout time.Duration) error
+}
+
+// PodRemediator performs approval-gated pod quarantine and replacement.
+type PodRemediator interface {
+	SetAutopilotReady(ctx context.Context, podName string, podUID types.UID, ready bool, reason, message string) error
+	WaitUntilNotRouted(ctx context.Context, podUID types.UID, timeout time.Duration) error
+	DeleteOwnedPod(ctx context.Context, podName string, podUID types.UID) error
+	WaitForReplacementReady(ctx context.Context, excludeUID types.UID, knownUIDs map[types.UID]struct{}, timeout time.Duration) error
+	SyncReadinessGates(ctx context.Context, activeOutlierPod string) error
+}
+
+// ReplacementScaler is an optional hook used in physical tests to add
+// replacement capacity after a quarantine recommendation is published. In
+// production KEDA performs this scale asynchronously.
+type ReplacementScaler interface {
+	EnsureReplacementCapacity(ctx context.Context, replicas int32) error
 }
 
 // Recorder is satisfied by telemetry.Emitter.
@@ -78,6 +96,8 @@ type Controller struct {
 	snapshots          SnapshotProvider
 	replicas           ReplicaReader
 	rollout            RolloutVerifier
+	remediator         PodRemediator
+	replacementScaler  ReplacementScaler
 	recorder           Recorder
 	approvalSecret     []byte
 	metricsHandler     http.Handler
@@ -114,6 +134,17 @@ func WithRolloutVerifier(rv RolloutVerifier) Option {
 	return func(c *Controller) { c.rollout = rv }
 }
 
+// WithPodRemediator supplies the Kubernetes pod remediation client.
+func WithPodRemediator(r PodRemediator) Option {
+	return func(c *Controller) { c.remediator = r }
+}
+
+// WithReplacementScaler supplies a synchronous replacement-capacity hook for
+// physical tests where KEDA is not running.
+func WithReplacementScaler(s ReplacementScaler) Option {
+	return func(c *Controller) { c.replacementScaler = s }
+}
+
 // WithSleep overrides the verification window wait (tests only).
 func WithSleep(sleep func(time.Duration)) Option {
 	return func(c *Controller) { c.sleep = sleep }
@@ -140,6 +171,9 @@ func New(cfg config.Config, engine *policy.Engine, snapshots SnapshotProvider, r
 	}
 	if rv, ok := replicas.(RolloutVerifier); ok {
 		c.rollout = rv
+	}
+	if r, ok := replicas.(PodRemediator); ok {
+		c.remediator = r
 	}
 	return c, nil
 }
@@ -247,6 +281,20 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 	}
 	snapshot.Available = status.Available
 
+	if c.remediator != nil {
+		activeOutlier := ""
+		pending := c.state.LastRecommendation
+		if pending.Decision == model.DecisionQuarantine &&
+			(c.state.LastAction.RecommendationID != pending.ID || c.state.LastAction.CompletedAt.IsZero()) {
+			activeOutlier = pending.TargetPod
+		}
+		if err := c.remediator.SyncReadinessGates(ctx, activeOutlier); err != nil {
+			c.recorder.Heartbeat()
+			c.mu.Unlock()
+			return fmt.Errorf("sync readiness gates: %w", err)
+		}
+	}
+
 	rec := c.engine.Evaluate(snapshot, now)
 	c.state.LastRecommendation = rec
 	c.state.LastSnapshot = snapshot
@@ -272,6 +320,8 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 		}
 		// dry-run: never publish a scale change.
 		// approval: hold until POST /api/actions/{id}/approve.
+	case model.DecisionQuarantine:
+		// Pod quarantine and replacement is always approval-only.
 	}
 
 	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
@@ -294,17 +344,51 @@ func (c *Controller) verifyAfterAction(ctx context.Context, before model.Snapsho
 	if c.rollout == nil {
 		return nil
 	}
-	verification, err := c.Verify(ctx, before, rec)
+	var verification model.Verification
+	var err error
+	if rec.Decision == model.DecisionQuarantine {
+		verification, err = c.verifySnapshotOnly(ctx, before, rec)
+	} else {
+		verification, err = c.Verify(ctx, before, rec)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state.LastAction.RecommendationID != rec.ID {
 		return err
 	}
 	if err != nil {
-		return fmt.Errorf("post-scale verification: %w", err)
+		return fmt.Errorf("post-action verification: %w", err)
 	}
 	c.state.LastVerification = verification
 	return c.persistStateLocked()
+}
+
+func (c *Controller) verifySnapshotOnly(ctx context.Context, before model.Snapshot, rec model.Recommendation) (model.Verification, error) {
+	if window := c.cfg.Controller.VerificationWindow; window > 0 {
+		if c.sleep != nil {
+			c.sleep(window)
+		}
+	}
+	target, err := c.rollout.Target(ctx)
+	if err != nil {
+		return model.Verification{}, fmt.Errorf("read post-action target: %w", err)
+	}
+	after, err := c.snapshots.Snapshot(ctx, c.cfg, target.DesiredReplicas)
+	if err != nil {
+		return model.Verification{}, fmt.Errorf("post-action snapshot: %w", err)
+	}
+	verification := model.Verification{
+		RecommendationID: rec.ID,
+		BeforeSLI:        before.SLI,
+		AfterSLI:         after.SLI,
+		BeforeP95MS:      before.P95MS,
+		AfterP95MS:       after.P95MS,
+		BeforeErrorRate:  before.ErrorRate,
+		AfterErrorRate:   after.ErrorRate,
+		Result:           classifyVerification(before, after, c.cfg.Signals.SLIObjective),
+	}
+	c.recorder.RecordIncidentReport(rec, verification, before.CurrentReplicas, target.DesiredReplicas)
+	return verification, nil
 }
 
 func (c *Controller) executeLocked(rec model.Recommendation, now time.Time) bool {
@@ -332,9 +416,13 @@ func (c *Controller) Approve(ctx context.Context, id, token, operator string, no
 		c.mu.Unlock()
 		return fmt.Errorf("unknown or superseded recommendation %q", id)
 	}
+	if rec.Decision == model.DecisionQuarantine {
+		c.mu.Unlock()
+		return c.approveQuarantine(ctx, id, token, operator, now)
+	}
 	if rec.Decision != model.DecisionScaleUp && rec.Decision != model.DecisionScaleDown {
 		c.mu.Unlock()
-		return fmt.Errorf("recommendation %q is not an executable scaling action", id)
+		return fmt.Errorf("recommendation %q is not an executable action", id)
 	}
 	if c.state.LastAction.RecommendationID == id && !c.state.LastAction.CompletedAt.IsZero() {
 		c.mu.Unlock()
@@ -358,6 +446,104 @@ func (c *Controller) Approve(ctx context.Context, id, token, operator string, no
 		Result:           "approved_and_published",
 	}
 	c.engine.RecordAction(now)
+	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
+	if err := c.persistStateLocked(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	return c.verifyAfterAction(ctx, beforeSnapshot, recCopy)
+}
+
+func (c *Controller) approveQuarantine(ctx context.Context, id, token, operator string, now time.Time) error {
+	if c.remediator == nil || c.rollout == nil {
+		return fmt.Errorf("pod remediation is not configured")
+	}
+
+	c.mu.Lock()
+	rec := c.state.LastRecommendation
+	if rec.ID != id {
+		c.mu.Unlock()
+		return fmt.Errorf("unknown or superseded recommendation %q", id)
+	}
+	if rec.Decision != model.DecisionQuarantine {
+		c.mu.Unlock()
+		return fmt.Errorf("recommendation %q is not a quarantine action", id)
+	}
+	if rec.TargetPod == "" {
+		c.mu.Unlock()
+		return fmt.Errorf("recommendation %q is missing a target pod", id)
+	}
+	if c.state.LastAction.RecommendationID == id && !c.state.LastAction.CompletedAt.IsZero() {
+		c.mu.Unlock()
+		return nil
+	}
+	if err := VerifyApproval(c.approvalSecret, token, id, now); err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("verify approval: %w", err)
+	}
+	beforeSnapshot := c.state.LastSnapshot
+	recCopy := rec
+	c.mu.Unlock()
+
+	target, err := c.rollout.Target(ctx)
+	if err != nil {
+		return fmt.Errorf("read target pods: %w", err)
+	}
+	knownUIDs := make(map[types.UID]struct{}, len(target.Pods))
+	var podUID types.UID
+	for _, pod := range target.Pods {
+		knownUIDs[pod.UID] = struct{}{}
+		if pod.Name == recCopy.TargetPod {
+			podUID = pod.UID
+		}
+	}
+	if podUID == "" {
+		return fmt.Errorf("target pod %q not found in deployment", recCopy.TargetPod)
+	}
+
+	if err := c.remediator.SetAutopilotReady(ctx, recCopy.TargetPod, podUID, false, "TelemetryOutlier",
+		"Quarantined after approved SigNoz Incident Autopilot recommendation"); err != nil {
+		return fmt.Errorf("quarantine pod: %w", err)
+	}
+	if err := c.remediator.WaitUntilNotRouted(ctx, podUID, 0); err != nil {
+		return fmt.Errorf("drain quarantined pod: %w", err)
+	}
+
+	c.mu.Lock()
+	c.state.PublishedReplicas = recCopy.RecommendedReplicas
+	c.state.LastAction = model.Action{
+		RecommendationID: id,
+		ApprovedBy:       operator,
+		ApprovedAt:       now,
+		StartedAt:        now,
+		Result:           "quarantine_replacement_scaling",
+	}
+	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
+	if err := c.persistStateLocked(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	if c.replacementScaler != nil {
+		if err := c.replacementScaler.EnsureReplacementCapacity(ctx, recCopy.RecommendedReplicas); err != nil {
+			return fmt.Errorf("ensure replacement capacity: %w", err)
+		}
+	}
+
+	if err := c.remediator.WaitForReplacementReady(ctx, podUID, knownUIDs, 0); err != nil {
+		return fmt.Errorf("wait for replacement pod: %w", err)
+	}
+	if err := c.remediator.DeleteOwnedPod(ctx, recCopy.TargetPod, podUID); err != nil {
+		return fmt.Errorf("delete quarantined pod: %w", err)
+	}
+
+	c.mu.Lock()
+	c.state.LastAction.CompletedAt = c.now()
+	c.state.LastAction.Result = "quarantine_replaced"
+	c.engine.RecordAction(c.now())
 	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
 	if err := c.persistStateLocked(); err != nil {
 		c.mu.Unlock()
@@ -514,6 +700,7 @@ const approvalPageTemplate = `<!doctype html>
 <h1>Recommendation %s</h1>
 <p><strong>Decision:</strong> %s</p>
 <p><strong>Current replicas:</strong> %d &rarr; <strong>Recommended replicas:</strong> %d</p>
+%s
 <p><strong>Reason:</strong> %s</p>
 <p><strong>Expires at:</strong> %s</p>
 <form method="post" action="/api/actions/%s/approve" onsubmit="return submitApproval(event)">
@@ -550,12 +737,17 @@ func (c *Controller) handleShowAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := SignApproval(c.approvalSecret, rec.ID, rec.ExpiresAt)
+	targetPodLine := ""
+	if rec.TargetPod != "" {
+		targetPodLine = fmt.Sprintf("<p><strong>Target pod:</strong> %s</p>", html.EscapeString(rec.TargetPod))
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, approvalPageTemplate,
 		html.EscapeString(rec.ID),
 		html.EscapeString(string(rec.Decision)),
 		rec.CurrentReplicas,
 		rec.RecommendedReplicas,
+		targetPodLine,
 		html.EscapeString(rec.Reason),
 		rec.ExpiresAt.Format(time.RFC3339),
 		html.EscapeString(rec.ID),

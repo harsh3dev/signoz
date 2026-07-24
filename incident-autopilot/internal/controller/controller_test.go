@@ -7,6 +7,10 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/config"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/model"
@@ -488,5 +492,198 @@ func TestApproveVerifiesRolloutFailed(t *testing.T) {
 	}
 	if recorder.reports[0].Result != "rollout_failed" {
 		t.Fatalf("expected rollout_failed verification, got %s", recorder.reports[0].Result)
+	}
+}
+
+type fakeRemediator struct {
+	target             kube.TargetState
+	setReadyCalls      int
+	waitRoutedCalls    int
+	waitReplaceCalls   int
+	deleteCalls        int
+	waitReplaceErr     error
+	deleteErr          error
+	syncCalls          int
+}
+
+func (f *fakeRemediator) SetAutopilotReady(context.Context, string, types.UID, bool, string, string) error {
+	f.setReadyCalls++
+	return nil
+}
+
+func (f *fakeRemediator) WaitUntilNotRouted(context.Context, types.UID, time.Duration) error {
+	f.waitRoutedCalls++
+	return nil
+}
+
+func (f *fakeRemediator) DeleteOwnedPod(context.Context, string, types.UID) error {
+	f.deleteCalls++
+	return f.deleteErr
+}
+
+func (f *fakeRemediator) WaitForReplacementReady(context.Context, types.UID, map[types.UID]struct{}, time.Duration) error {
+	f.waitReplaceCalls++
+	return f.waitReplaceErr
+}
+
+func (f *fakeRemediator) SyncReadinessGates(context.Context, string) error {
+	f.syncCalls++
+	return nil
+}
+
+func (f *fakeRemediator) Target(context.Context) (kube.TargetState, error) {
+	return f.target, nil
+}
+
+func (f *fakeRemediator) WaitForRollout(context.Context, int64, time.Duration) error {
+	return nil
+}
+
+func quarantineRecommendation(id, targetPod string, current, recommended int32) model.Recommendation {
+	now := time.Unix(1_700_000_000, 0)
+	return model.Recommendation{
+		ID:                  id,
+		CreatedAt:           now,
+		ExpiresAt:           now.Add(5 * time.Minute),
+		Decision:            model.DecisionQuarantine,
+		CurrentReplicas:     current,
+		RecommendedReplicas: recommended,
+		TargetPod:           targetPod,
+		Reason:              "Pod outlier detected",
+	}
+}
+
+func TestExpiredPodApprovalDoesNothing(t *testing.T) {
+	cfg := testConfig(t, "approval")
+	secret := []byte("secret")
+	podUID := types.UID("pod-uid-expired")
+
+	remediator := &fakeRemediator{
+		target: kube.TargetState{
+			Pods: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "checkout-api-bad", UID: podUID}}},
+		},
+	}
+	c, err := New(cfg, policy.New(cfg), fakeSnapshots{}, fakeReplicas{n: 3}, noopRecorder{}, secret,
+		WithRolloutVerifier(remediator),
+		WithPodRemediator(remediator),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec := quarantineRecommendation("rec-quarantine-expired", "checkout-api-bad", 3, 4)
+	c.mu.Lock()
+	c.state.LastRecommendation = rec
+	c.state.PublishedReplicas = 3
+	c.mu.Unlock()
+
+	token := SignApproval(secret, rec.ID, rec.ExpiresAt)
+	after := rec.ExpiresAt.Add(time.Minute)
+	if err := c.Approve(context.Background(), rec.ID, token, "alice", after); err == nil {
+		t.Fatal("expected an error approving an expired quarantine recommendation")
+	}
+	if remediator.setReadyCalls != 0 {
+		t.Fatalf("expected no quarantine actions, got %d SetAutopilotReady calls", remediator.setReadyCalls)
+	}
+	if got := c.PublishedReplicas(); got != 3 {
+		t.Fatalf("expired quarantine approval must not change published replicas; expected 3, got %d", got)
+	}
+}
+
+func TestReplacementFailurePreservesQuarantinedPod(t *testing.T) {
+	cfg := testConfig(t, "approval")
+	cfg.Controller.VerificationWindow = 0
+	secret := []byte("secret")
+	podUID := types.UID("pod-uid-preserve")
+
+	remediator := &fakeRemediator{
+		target: kube.TargetState{
+			Generation:        2,
+			DesiredReplicas:   4,
+			AvailableReplicas: 4,
+			Pods: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "checkout-api-bad", UID: podUID}}},
+		},
+		waitReplaceErr: errors.New("replacement pod not ready"),
+	}
+	c, err := New(cfg, policy.New(cfg), &sequenceSnapshots{values: []model.Snapshot{
+		{SLI: 0.995, P95MS: 800, ErrorRate: 0.01},
+	}}, fakeReplicas{n: 3}, noopRecorder{}, secret,
+		WithRolloutVerifier(remediator),
+		WithPodRemediator(remediator),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec := quarantineRecommendation("rec-quarantine-preserve", "checkout-api-bad", 3, 4)
+	c.mu.Lock()
+	c.state.LastRecommendation = rec
+	c.state.LastSnapshot = model.Snapshot{CurrentReplicas: 3, SLI: 0.95}
+	c.state.PublishedReplicas = 3
+	c.mu.Unlock()
+
+	token := SignApproval(secret, rec.ID, rec.ExpiresAt)
+	now := rec.CreatedAt.Add(time.Second)
+	if err := c.Approve(context.Background(), rec.ID, token, "alice", now); err == nil {
+		t.Fatal("expected replacement failure to return an error")
+	}
+	if remediator.setReadyCalls != 1 {
+		t.Fatalf("expected pod to be quarantined once, got %d calls", remediator.setReadyCalls)
+	}
+	if remediator.deleteCalls != 0 {
+		t.Fatalf("expected quarantined pod to be preserved, got %d delete calls", remediator.deleteCalls)
+	}
+	if got := c.PublishedReplicas(); got != 4 {
+		t.Fatalf("expected replacement capacity to be published as 4, got %d", got)
+	}
+}
+
+func TestApproveQuarantineReplacesPod(t *testing.T) {
+	cfg := testConfig(t, "approval")
+	cfg.Controller.VerificationWindow = 0
+	secret := []byte("secret")
+	podUID := types.UID("pod-uid-replace")
+
+	recorder := &recordingRecorder{}
+	remediator := &fakeRemediator{
+		target: kube.TargetState{
+			Generation:        2,
+			DesiredReplicas:   4,
+			AvailableReplicas: 4,
+			Pods: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "checkout-api-bad", UID: podUID}}},
+		},
+	}
+	c, err := New(cfg, policy.New(cfg), &sequenceSnapshots{values: []model.Snapshot{
+		{SLI: 0.995, P95MS: 800, ErrorRate: 0.01},
+	}}, fakeReplicas{n: 3}, recorder, secret,
+		WithRolloutVerifier(remediator),
+		WithPodRemediator(remediator),
+		WithSleep(func(time.Duration) {}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec := quarantineRecommendation("rec-quarantine-ok", "checkout-api-bad", 3, 4)
+	c.mu.Lock()
+	c.state.LastRecommendation = rec
+	c.state.LastSnapshot = model.Snapshot{CurrentReplicas: 3, SLI: 0.95}
+	c.state.PublishedReplicas = 3
+	c.mu.Unlock()
+
+	token := SignApproval(secret, rec.ID, rec.ExpiresAt)
+	now := rec.CreatedAt.Add(time.Second)
+	if err := c.Approve(context.Background(), rec.ID, token, "alice", now); err != nil {
+		t.Fatalf("unexpected approve error: %v", err)
+	}
+	if remediator.deleteCalls != 1 {
+		t.Fatalf("expected quarantined pod to be deleted, got %d delete calls", remediator.deleteCalls)
+	}
+	if got := c.PublishedReplicas(); got != 4 {
+		t.Fatalf("expected published replicas 4 during replacement, got %d", got)
+	}
+	if len(recorder.reports) != 1 {
+		t.Fatalf("expected one incident report after quarantine replacement, got %d", len(recorder.reports))
 	}
 }

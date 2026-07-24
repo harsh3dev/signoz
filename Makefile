@@ -3,7 +3,7 @@
 .PHONY: collector-up collector-down collector-logs
 .PHONY: demo-install demo demo-build
 .PHONY: autopilot-build autopilot-test autopilot-vet autopilot-run
-.PHONY: test cluster cluster-delete k8s-setup k8s-install-keda k8s-build-images k8s-deploy k8s-load physical-verify clean
+.PHONY: test cluster cluster-delete k8s-setup k8s-install-keda k8s-build-images k8s-deploy k8s-load physical-verify physical-quarantine-verify clean
 
 # Repository layout
 ROOT            := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
@@ -64,6 +64,8 @@ urls: ## Print local service URLs
 # ---------------------------------------------------------------------------
 
 signoz-up: ## Start self-hosted SigNoz via Docker Compose
+	@echo "==> Fetching ClickHouse user scripts"
+	$(SIGNOZ_DIR)/scripts/fetch-user-scripts.sh
 	@echo "==> Starting SigNoz"
 	cd $(SIGNOZ_DIR) && docker compose up -d
 	@echo "==> Waiting for SigNoz health"
@@ -130,8 +132,9 @@ autopilot: autopilot-run ## Alias for autopilot-run
 
 autopilot-run: ## Run incident-autopilot locally (foreground)
 	@mkdir -p $(AUTOPILOT_DIR)/.state
+	@set -a && [ -f $(AUTOPILOT_DIR)/.env.local ] && . $(AUTOPILOT_DIR)/.env.local; set +a; \
 	cd $(AUTOPILOT_DIR) && \
-		AUTOPILOT_APPROVAL_SECRET=$(AUTOPILOT_SECRET) \
+		AUTOPILOT_APPROVAL_SECRET=$${AUTOPILOT_APPROVAL_SECRET:-$(AUTOPILOT_SECRET)} \
 		go run ./cmd/autopilot \
 			--config $(AUTOPILOT_CONFIG) \
 			--listen-addr :$(AUTOPILOT_PORT) \
@@ -184,6 +187,9 @@ k8s-load: ## Deploy load generator for capacity testing
 
 physical-verify: ## Run end-to-end physical verification on Kind
 	$(AUTOPILOT_DIR)/scripts/physical-verify.sh
+
+physical-quarantine-verify: ## Run Task 8 quarantine physical verification on Kind
+	$(AUTOPILOT_DIR)/scripts/physical-quarantine-verify.sh
 
 clean: ## Remove local build artifacts
 	rm -rf $(AUTOPILOT_DIR)/bin
