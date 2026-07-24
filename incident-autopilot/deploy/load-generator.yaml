@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: load-generator-script
+  namespace: autopilot-demo
+data:
+  script.js: |
+    import http from 'k6/http';
+    import { check, sleep } from 'k6';
+
+    const BASE_URL = __ENV.TARGET_URL || 'http://checkout-api.autopilot-demo.svc.cluster.local:3000';
+
+    export const options = {
+      vus: Number(__ENV.K6_VUS || 5),
+      duration: __ENV.K6_DURATION || '10m',
+    };
+
+    export default function () {
+      const payload = JSON.stringify({
+        items: [{ id: 'prod-001', quantity: 1 }],
+        customerName: 'load-generator',
+        shippingAddress: '1 Autopilot Way',
+      });
+
+      const res = http.post(`${BASE_URL}/api/orders`, payload, {
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      check(res, {
+        'status is 201 or 500': (r) => r.status === 201 || r.status === 500,
+      });
+
+      sleep(1);
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-generator
+  namespace: autopilot-demo
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: grafana/k6:0.57.0
+          args: ["run", "/scripts/script.js"]
+          env:
+            - name: K6_VUS
+              value: "5"
+            - name: K6_DURATION
+              value: "10m"
+            - name: TARGET_URL
+              value: http://checkout-api.autopilot-demo.svc.cluster.local:3000
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+      volumes:
+        - name: script
+          configMap:
+            name: load-generator-script

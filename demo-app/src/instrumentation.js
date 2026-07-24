@@ -17,6 +17,10 @@ const resource = new Resource({
   'service.name': process.env.OTEL_SERVICE_NAME || 'telemetry-shop-api',
   'service.version': '1.0.0',
   'deployment.environment': process.env.OTEL_DEPLOYMENT_ENVIRONMENT || 'local',
+  'k8s.namespace.name': process.env.K8S_NAMESPACE_NAME || 'local',
+  'k8s.deployment.name': process.env.K8S_DEPLOYMENT_NAME || 'local',
+  'k8s.pod.name': process.env.K8S_POD_NAME || 'local',
+  'k8s.pod.uid': process.env.K8S_POD_UID || 'local',
 });
 
 // Trace Exporter
