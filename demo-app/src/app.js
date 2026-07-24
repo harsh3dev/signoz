@@ -36,6 +36,15 @@ let chaosConfig = {
   enabled: process.env.CHAOS_ENABLED !== 'false',
 };
 
+// Deterministic pod-local behavior, controlled via /api/demo/behavior.
+// Used by the Incident Autopilot demo to drive reproducible capacity and
+// bad-pod scenarios, independent of the random chaos config above.
+const podBehavior = {
+  ready: true,
+  inventoryDelayMs: Number(process.env.INVENTORY_DELAY_MS || 0),
+  inventoryErrorRate: Number(process.env.INVENTORY_ERROR_RATE || 0),
+};
+
 // OpenTelemetry Metrics Setup
 const meter = metrics.getMeter('telemetry-shop-meter');
 
@@ -54,6 +63,17 @@ const paymentFailuresCounter = meter.createCounter('payment.failures', {
 
 const customEventsCounter = meter.createCounter('demo.custom_events', {
   description: 'Custom manual button clicks or user telemetry events',
+});
+
+// Underscore-named metrics consumed directly by the Incident Autopilot
+// controller's Prometheus queries (see incident-autopilot/config.example.yaml).
+const checkoutRequestsCounter = meter.createCounter('checkout_requests_total', {
+  description: 'Checkout requests classified by outcome',
+});
+
+const checkoutDurationMilliseconds = meter.createHistogram('checkout_duration_milliseconds', {
+  description: 'Checkout duration in milliseconds',
+  unit: 'ms',
 });
 
 // Middleware
@@ -99,6 +119,28 @@ app.use((req, res, next) => {
 app.get('/api/health', (req, res) => {
   logger.info('Liveness check requested');
   res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+// 1b. Kubernetes-style liveness/readiness probes and deterministic behavior
+// control, used by the Incident Autopilot demo scenarios.
+app.get('/api/health/live', (_req, res) => {
+  res.status(200).json({ status: 'alive' });
+});
+
+app.get('/api/health/ready', (_req, res) => {
+  res.status(podBehavior.ready ? 200 : 503).json({
+    status: podBehavior.ready ? 'ready' : 'not_ready',
+    pod: process.env.K8S_POD_NAME || 'local',
+  });
+});
+
+app.post('/api/demo/behavior', (req, res) => {
+  const { ready, inventoryDelayMs, inventoryErrorRate } = req.body;
+  if (typeof ready === 'boolean') podBehavior.ready = ready;
+  if (Number.isFinite(inventoryDelayMs)) podBehavior.inventoryDelayMs = inventoryDelayMs;
+  if (Number.isFinite(inventoryErrorRate)) podBehavior.inventoryErrorRate = inventoryErrorRate;
+  logger.info('Deterministic pod behavior updated', podBehavior);
+  res.json(podBehavior);
 });
 
 // 2. Fetch Products
@@ -158,8 +200,28 @@ app.post('/api/orders', async (req, res) => {
     await tracer.startActiveSpan('reserveInventory', async (span) => {
       try {
         span.setAttribute('inventory.count', validatedItems.length);
-        // Chaos simulation: Random fail chance if chaosConfig.errorRate matches
-        if (chaosConfig.enabled && chaosConfig.errorRate > 0) {
+
+        // Deterministic queueing delay for the Incident Autopilot capacity scenario.
+        const queueStart = Date.now();
+        if (podBehavior.inventoryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, podBehavior.inventoryDelayMs));
+        }
+        span.setAttribute('inventory.queue_time_ms', Date.now() - queueStart);
+
+        if (podBehavior.inventoryErrorRate > 0) {
+          // Deterministic failure rate for the Incident Autopilot bad-pod scenario.
+          const chance = Math.random() * 100;
+          if (chance < podBehavior.inventoryErrorRate) {
+            const err = new Error('Inventory lock timeout. Item temporarily out of stock.');
+            span.recordException(err);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+            logger.warn('Inventory reservation failed due to deterministic pod behavior', {
+              inventoryErrorRate: podBehavior.inventoryErrorRate,
+            });
+            throw err;
+          }
+        } else if (chaosConfig.enabled && chaosConfig.errorRate > 0) {
+          // Legacy random chaos simulation, used when deterministic behavior is disabled.
           const chance = Math.random() * 100;
           if (chance < (chaosConfig.errorRate / 2)) { // Split failure risk between payment and inventory
             const err = new Error('Inventory lock timeout. Item temporarily out of stock.');
@@ -226,6 +288,8 @@ app.post('/api/orders', async (req, res) => {
     const duration = Date.now() - startTime;
     checkoutDurationHistogram.record(duration, { status: 'success' });
     ordersCreatedCounter.add(1, { status: 'success' });
+    checkoutDurationMilliseconds.record(duration, { status: 'success' });
+    checkoutRequestsCounter.add(1, { status: 'success' });
 
     res.status(201).json({
       message: 'Order created successfully!',
@@ -236,6 +300,8 @@ app.post('/api/orders', async (req, res) => {
     const duration = Date.now() - startTime;
     checkoutDurationHistogram.record(duration, { status: 'failed' });
     ordersCreatedCounter.add(1, { status: 'failed' });
+    checkoutDurationMilliseconds.record(duration, { status: 'failed' });
+    checkoutRequestsCounter.add(1, { status: 'failed' });
 
     // Client-facing error messages must be generic and non-sensitive
     logger.error('Checkout flow failed', { error: err.message });
