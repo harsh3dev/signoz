@@ -1,0 +1,134 @@
+# Before applying this file, create the two secrets it references:
+#
+#   kubectl create secret generic incident-autopilot-approval \
+#     --namespace autopilot-demo \
+#     --from-literal=secret="$(openssl rand -base64 32)"
+#
+#   kubectl create secret generic signoz-credentials \
+#     --namespace autopilot-demo \
+#     --from-literal=api-key="<your SigNoz API key>"
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: incident-autopilot-config
+  namespace: autopilot-demo
+data:
+  config.yaml: |
+    signoz:
+      url: http://host.docker.internal:8080
+      api_key_env: SIGNOZ_API_KEY
+    target:
+      service: checkout-api
+      environment: demo
+      namespace: autopilot-demo
+      deployment: checkout-api
+      readiness_gate: autopilot.signoz.io/healthy
+    signals:
+      request_rate_query: sum(rate(checkout_requests_total{service_name="checkout-api"}[2m]))
+      p95_latency_query: histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{service_name="checkout-api"}[2m])))
+      error_rate_query: sum(rate(checkout_requests_total{service_name="checkout-api",status="failed"}[2m])) / sum(rate(checkout_requests_total{service_name="checkout-api"}[2m]))
+      sli_query: 1 - (sum(rate(checkout_requests_total{service_name="checkout-api",status="failed"}[5m])) / sum(rate(checkout_requests_total{service_name="checkout-api"}[5m])))
+      sli_objective: 0.99
+      freshness_limit: 60s
+    policy:
+      min_replicas: 2
+      max_replicas: 10
+      target_requests_per_replica: 25
+      latency_target_ms: 800
+      error_rate_target: 0.02
+      max_scale_up_step: 4
+      max_scale_down_step: 1
+      cooldown: 2m
+      pod_outlier:
+        minimum_requests: 20
+        error_rate_multiplier: 3
+        latency_multiplier: 2
+        consecutive_evaluations: 3
+    controller:
+      mode: approval
+      evaluation_interval: 15s
+      verification_window: 2m
+      state_path: /var/lib/autopilot/state.json
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: incident-autopilot
+  namespace: autopilot-demo
+  labels:
+    app: incident-autopilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: incident-autopilot
+  template:
+    metadata:
+      labels:
+        app: incident-autopilot
+    spec:
+      serviceAccountName: incident-autopilot
+      containers:
+        - name: incident-autopilot
+          image: incident-autopilot:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/autopilot/config.yaml
+            - --listen-addr=:8080
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: AUTOPILOT_APPROVAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: incident-autopilot-approval
+                  key: secret
+            - name: SIGNOZ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: signoz-credentials
+                  key: api-key
+          volumeMounts:
+            - name: config
+              mountPath: /etc/autopilot
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/autopilot
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8080
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: incident-autopilot-config
+        - name: state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: incident-autopilot
+  namespace: autopilot-demo
+spec:
+  selector:
+    app: incident-autopilot
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

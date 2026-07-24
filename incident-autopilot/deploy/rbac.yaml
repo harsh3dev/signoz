@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: incident-autopilot
+  namespace: autopilot-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: incident-autopilot
+  namespace: autopilot-demo
+rules:
+  # Read target state: desired/available replicas, pod health, and which
+  # endpoints are actually serving traffic.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Set the custom readiness condition on target pods (approval-gated
+  # quarantine only touches pods/status, never pod spec).
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["patch"]
+  # Delete a quarantined pod only after an approved replacement is ready and
+  # traffic has drained. No wildcard verbs; no deployment/replicaset writes.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: incident-autopilot
+  namespace: autopilot-demo
+subjects:
+  - kind: ServiceAccount
+    name: incident-autopilot
+    namespace: autopilot-demo
+roleRef:
+  kind: Role
+  name: incident-autopilot
+  apiGroup: rbac.authorization.k8s.io
