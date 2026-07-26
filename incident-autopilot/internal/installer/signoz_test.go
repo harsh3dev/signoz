@@ -257,7 +257,7 @@ func TestAlertAnnotationsLinkToApprovalUIAndDashboard(t *testing.T) {
 		if !strings.Contains(desc, "http://signoz.test/dashboard/dash-1") {
 			t.Fatalf("alert %q missing dashboard link: %s", spec.Alert, desc)
 		}
-		if !strings.Contains(desc, "http://autopilot.test:9090/actions/latest") {
+		if !strings.Contains(desc, "http://autopilot.test:9090/actions") {
 			t.Fatalf("alert %q missing approval link: %s", spec.Alert, desc)
 		}
 	}

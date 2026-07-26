@@ -27,6 +27,7 @@ import (
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/controller"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/installer"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/kube"
+	"github.com/harsh3dev/signoz/incident-autopilot/internal/loadtest"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/policy"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/signoz"
 	"github.com/harsh3dev/signoz/incident-autopilot/internal/telemetry"
@@ -112,6 +113,8 @@ func runController(args []string) {
 	if err != nil {
 		log.Fatalf("build kubernetes client: %v", err)
 	}
+	clientset := kubeClient.Clientset()
+	loadRunner := loadtest.NewRunner(clientset, cfg.Target.Namespace, cfg.Target.Deployment)
 	snapshotProvider := &signoz.Bridge{Client: signozClient, Kube: kubeClient}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -146,7 +149,9 @@ func runController(args []string) {
 	engine := policy.New(cfg)
 	ctrl, err := controller.New(cfg, engine, snapshotProvider, kubeClient, emitter, approvalSecret,
 		controller.WithMetricsHandler(emitter.Handler()),
-		controller.WithPrometheusAPIHandler(emitter.InstantQueryHandler()))
+		controller.WithPrometheusAPIHandler(emitter.InstantQueryHandler()),
+		controller.WithLoadRunner(loadRunner),
+	)
 	if err != nil {
 		log.Fatalf("build controller: %v", err)
 	}
@@ -157,7 +162,7 @@ func runController(args []string) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
-		log.Printf("serving approval UI/API and /metrics on %s", *listenAddr)
+		log.Printf("serving API and /metrics on %s", *listenAddr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("http server: %v", err)
 		}
@@ -178,7 +183,7 @@ func runController(args []string) {
 			cancel()
 			return
 		case <-ticker.C:
-			evalCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			evalCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			if err := ctrl.Evaluate(evalCtx); err != nil {
 				log.Printf("evaluate: %v", err)
 			}

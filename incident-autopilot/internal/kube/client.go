@@ -90,6 +90,11 @@ func New(cfg config.Config, clientset kubernetes.Interface, opts ...Option) *Cli
 	return c
 }
 
+// Clientset returns the underlying Kubernetes clientset.
+func (c *Client) Clientset() kubernetes.Interface {
+	return c.clientset
+}
+
 // Target returns the Deployment UID, generation, replica counts, and Pods
 // owned by the configured Deployment through a ReplicaSet owner reference.
 func (c *Client) Target(ctx context.Context) (TargetState, error) {

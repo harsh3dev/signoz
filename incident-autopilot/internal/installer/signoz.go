@@ -306,7 +306,7 @@ type alertSpec struct {
 }
 
 func (i *Installer) alertDefinitions(channel, dashboardURL string) []alertSpec {
-	approvalURL := i.approvalURL + "/actions/latest"
+	approvalURL := i.approvalURL + "/actions"
 	annotations := func(summary string) map[string]string {
 		return map[string]string{
 			"summary":     summary,

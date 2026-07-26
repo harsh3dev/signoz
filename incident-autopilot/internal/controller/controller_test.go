@@ -198,8 +198,8 @@ func TestIndeterminateSnapshotPublishesCurrentReplicas(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := c.Evaluate(context.Background()); err != nil {
-		t.Fatalf("unexpected evaluate error: %v", err)
+	if err := c.Evaluate(context.Background()); err == nil {
+		t.Fatal("expected snapshot error when telemetry is unavailable")
 	}
 	if got := c.PublishedReplicas(); got != 3 {
 		t.Fatalf("expected published replicas to fail closed to observed count 3, got %d", got)

@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +68,34 @@ type promQLQuery struct {
 	} `json:"spec"`
 }
 
+type scalarValue float64
+
+func (v *scalarValue) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		switch strings.ToLower(s) {
+		case "nan", "+inf", "-inf", "inf":
+			*v = 0
+			return nil
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		*v = scalarValue(f)
+		return nil
+	}
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	*v = scalarValue(f)
+	return nil
+}
+
 type queryRangeResponse struct {
 	Status string `json:"status"`
 	Error  *struct {
@@ -81,8 +111,8 @@ type queryRangeResponse struct {
 				Aggregations []struct {
 					Series []struct {
 						Values []struct {
-							Timestamp int64   `json:"timestamp"`
-							Value     float64 `json:"value"`
+							Timestamp int64       `json:"timestamp"`
+							Value     scalarValue `json:"value"`
 						} `json:"values"`
 					} `json:"series"`
 				} `json:"aggregations"`
@@ -171,7 +201,11 @@ func (c *Client) QueryScalar(ctx context.Context, query string, start, end time.
 				continue
 			}
 			if newest == nil || ts.After(newest.ObservedAt) {
-				newest = &Scalar{Value: v.Value, ObservedAt: ts}
+				fv := float64(v.Value)
+				if math.IsNaN(fv) || math.IsInf(fv, 0) {
+					continue
+				}
+				newest = &Scalar{Value: fv, ObservedAt: ts}
 			}
 		}
 	}
@@ -272,50 +306,61 @@ func (c *Client) EnrichPodSnapshots(ctx context.Context, cfg config.Config, snap
 	service := cfg.Target.Service
 
 	pods := make([]model.PodSnapshot, 0, len(podNames))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
 	for _, podName := range podNames {
-		rrQuery, err := ExpandPodQuery(
-			fmt.Sprintf(`sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER}}[2m]))`, service),
-			podName,
-		)
-		if err != nil {
-			return snap, err
-		}
-		errQuery, err := ExpandPodQuery(
-			fmt.Sprintf(`(sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="failed"}[2m])) or sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="success"}[2m])) * 0) / sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="success"}[2m]))`, service, service, service),
-			podName,
-		)
-		if err != nil {
-			return snap, err
-		}
-		p95Query, err := ExpandPodQuery(
-			fmt.Sprintf(`(histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{"service.name"=%q,${POD_FILTER}}[2m]))) or vector(0))`, service),
-			podName,
-		)
-		if err != nil {
-			return snap, err
-		}
+		podName := podName
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rrQuery, err := ExpandPodQuery(
+				fmt.Sprintf(`sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER}}[2m]))`, service),
+				podName,
+			)
+			if err != nil {
+				return
+			}
+			errQuery, err := ExpandPodQuery(
+				fmt.Sprintf(`(sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="failed"}[2m])) or sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="success"}[2m])) * 0) / sum(rate(checkout_requests_total{"service.name"=%q,${POD_FILTER},status="success"}[2m]))`, service, service, service),
+				podName,
+			)
+			if err != nil {
+				return
+			}
+			p95Query, err := ExpandPodQuery(
+				fmt.Sprintf(`(histogram_quantile(0.95, sum by (le) (rate(checkout_duration_milliseconds_bucket{"service.name"=%q,${POD_FILTER}}[2m]))) or vector(0))`, service),
+				podName,
+			)
+			if err != nil {
+				return
+			}
 
-		rr, err := c.QueryScalar(ctx, rrQuery, start, now)
-		if err != nil {
-			continue
-		}
-		er, err := c.QueryScalar(ctx, errQuery, start, now)
-		if err != nil {
-			continue
-		}
-		p95, err := c.QueryScalar(ctx, p95Query, start, now)
-		if err != nil {
-			continue
-		}
+			rr, err := c.QueryScalar(ctx, rrQuery, start, now)
+			if err != nil {
+				return
+			}
+			er, err := c.QueryScalar(ctx, errQuery, start, now)
+			if err != nil {
+				return
+			}
+			p95, err := c.QueryScalar(ctx, p95Query, start, now)
+			if err != nil {
+				return
+			}
 
-		pods = append(pods, model.PodSnapshot{
-			Name:        podName,
-			RequestRate: rr.Value,
-			P95MS:       p95.Value,
-			ErrorRate:   er.Value,
-			Ready:       true,
-		})
+			mu.Lock()
+			pods = append(pods, model.PodSnapshot{
+				Name:        podName,
+				RequestRate: rr.Value,
+				P95MS:       p95.Value,
+				ErrorRate:   er.Value,
+				Ready:       true,
+			})
+			mu.Unlock()
+		}()
 	}
+	wg.Wait()
 	snap.Pods = pods
 	return snap, nil
 }

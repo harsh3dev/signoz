@@ -203,19 +203,24 @@ demo-ready: ## Phases 1-7: SigNoz up, cluster+KEDA, build+deploy, secrets, clean
 	kubectl -n autopilot-demo scale deployment/checkout-api --replicas=2
 	kubectl -n autopilot-demo rollout status deployment/checkout-api --timeout=120s
 	@echo ""
-	@echo "Baseline ready. Next: make demo-load"
+	@echo "Baseline ready. Next:"
+	@echo "  1. kubectl -n autopilot-demo port-forward svc/incident-autopilot 8090:8080"
+	@echo "  2. cd incident-autopilot/internal/controller/ui && npm install && npm run dev"
+	@echo "  3. Open http://localhost:5173 — use Load Test and Actions pages"
 
-demo-load: ## Phase 8: port-forward autopilot UI + start load/incident, prints approval URL
-	@if ! curl -sf http://127.0.0.1:18080/metrics >/dev/null 2>&1; then \
-		echo "==> starting port-forward on :18080"; \
-		nohup kubectl -n autopilot-demo port-forward svc/incident-autopilot 18080:8080 >/tmp/autopilot-pf.log 2>&1 & \
+demo-load: ## Start port-forward + UI dev server instructions
+	@if ! curl -sf http://127.0.0.1:8090/metrics >/dev/null 2>&1; then \
+		echo "==> starting port-forward on :8090"; \
+		nohup kubectl -n autopilot-demo port-forward svc/incident-autopilot 8090:8080 >/tmp/autopilot-pf.log 2>&1 & \
 		sleep 2; \
 	else \
-		echo "==> port-forward already up"; \
+		echo "==> port-forward already up on :8090"; \
 	fi
-	$(AUTOPILOT_DIR)/scripts/load.sh
 	@echo ""
-	@echo "Approve at: http://127.0.0.1:18080/actions/latest"
+	@echo "Open the React control plane:"
+	@echo "  cd incident-autopilot/internal/controller/ui && npm install && npm run dev"
+	@echo "  http://localhost:5173/loadtest — start capacity load"
+	@echo "  http://localhost:5173/actions — approve when scale_up appears"
 
 demo-cleanup: ## Phase 11: stop load, reset baseline to 2 replicas
 	kubectl -n autopilot-demo delete job load-generator --ignore-not-found

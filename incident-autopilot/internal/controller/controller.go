@@ -10,12 +10,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -84,11 +82,12 @@ type Recorder interface {
 // State is persisted atomically to config.Controller.StatePath so a restart
 // never re-executes or forgets an in-flight action.
 type State struct {
-	LastRecommendation model.Recommendation `json:"last_recommendation"`
-	LastSnapshot       model.Snapshot       `json:"last_snapshot"`
-	LastAction         model.Action         `json:"last_action"`
-	LastVerification   model.Verification   `json:"last_verification"`
-	PublishedReplicas  int32                `json:"published_replicas"`
+	LastRecommendation model.Recommendation   `json:"last_recommendation"`
+	LastSnapshot       model.Snapshot         `json:"last_snapshot"`
+	LastAction         model.Action           `json:"last_action"`
+	LastVerification   model.Verification     `json:"last_verification"`
+	PublishedReplicas  int32                  `json:"published_replicas"`
+	History            []model.HistoryEntry   `json:"history,omitempty"`
 }
 
 type Controller struct {
@@ -103,6 +102,7 @@ type Controller struct {
 	approvalSecret     []byte
 	metricsHandler     http.Handler
 	prometheusAPIProxy http.Handler
+	loadRunner         LoadTestRunner
 
 	mu    sync.Mutex
 	state State
@@ -144,6 +144,11 @@ func WithPodRemediator(r PodRemediator) Option {
 // physical tests where KEDA is not running.
 func WithReplacementScaler(s ReplacementScaler) Option {
 	return func(c *Controller) { c.replacementScaler = s }
+}
+
+// WithLoadRunner supplies the load-test runner for /api/loadtest/* handlers.
+func WithLoadRunner(r LoadTestRunner) Option {
+	return func(c *Controller) { c.loadRunner = r }
 }
 
 // WithSleep overrides the verification window wait (tests only).
@@ -276,9 +281,12 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 		c.state.PublishedReplicas = replicas
 		c.recorder.RecordPublishedReplicas(replicas)
 		c.recorder.Heartbeat()
-		err = c.persistStateLocked()
+		persistErr := c.persistStateLocked()
 		c.mu.Unlock()
-		return err
+		if persistErr != nil {
+			return persistErr
+		}
+		return fmt.Errorf("snapshot: %w", err)
 	}
 	snapshot.Available = status.Available
 
@@ -297,10 +305,15 @@ func (c *Controller) Evaluate(ctx context.Context) error {
 	}
 
 	rec := c.engine.Evaluate(snapshot, now)
+	prevRec := c.state.LastRecommendation
 	c.state.LastRecommendation = rec
 	c.state.LastSnapshot = snapshot
 	c.recorder.RecordRecommendation(rec)
 	c.recorder.RecordDecision(rec)
+
+	if isActionableDecision(rec.Decision) && rec.ID != "" && rec.ID != prevRec.ID {
+		c.appendHistoryLocked(rec, "pending")
+	}
 
 	if c.state.PublishedReplicas == 0 {
 		// Bootstrap: before any action has ever been taken, published
@@ -446,6 +459,7 @@ func (c *Controller) Approve(ctx context.Context, id, token, operator string, no
 		CompletedAt:      now,
 		Result:           "approved_and_published",
 	}
+	c.updateHistoryOutcomeLocked(id, "approved", operator)
 	c.engine.RecordAction(now)
 	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
 	if err := c.persistStateLocked(); err != nil {
@@ -521,6 +535,7 @@ func (c *Controller) approveQuarantine(ctx context.Context, id, token, operator 
 		StartedAt:        now,
 		Result:           "quarantine_replacement_scaling",
 	}
+	c.updateHistoryOutcomeLocked(id, "approved", operator)
 	c.recorder.RecordPublishedReplicas(c.state.PublishedReplicas)
 	if err := c.persistStateLocked(); err != nil {
 		c.mu.Unlock()
@@ -669,44 +684,20 @@ func VerifyApproval(secret []byte, token, id string, now time.Time) error {
 	return nil
 }
 
-//go:embed ui/dist/*
-var uiFS embed.FS
-
-// Router exposes the approval UI, approval API, and (if configured) the
-// Prometheus metrics endpoint KEDA scrapes for the desired-replica signal.
+// Router exposes the approval API and (if configured) the Prometheus metrics
+// endpoint KEDA scrapes for the desired-replica signal.
 func (c *Controller) Router() http.Handler {
 	mux := http.NewServeMux()
-	
-	// API endpoints
+
+	mux.HandleFunc("GET /api/status", c.handleStatus)
+	mux.HandleFunc("GET /api/actions", c.handleListActions)
 	mux.HandleFunc("GET /api/actions/{id}", c.handleGetActionAPI)
 	mux.HandleFunc("POST /api/actions/{id}/approve", c.handleApprove)
-	
-	// Serve React App
-	distFS, err := fs.Sub(uiFS, "ui/dist")
-	if err != nil {
-		panic(err)
-	}
-	fileServer := http.FileServer(http.FS(distFS))
-	
-	mux.HandleFunc("GET /actions/latest", c.handleLatest)
-	
-	// Serve static assets and favicon
-	mux.Handle("GET /assets/", fileServer)
-	mux.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = "/favicon.svg"
-		fileServer.ServeHTTP(w, r)
-	})
-	
-	// Serve index.html for all other /actions/ routes to let React handle it
-	mux.HandleFunc("GET /actions/{id}", func(w http.ResponseWriter, r *http.Request) {
-		data, err := fs.ReadFile(distFS, "index.html")
-		if err != nil {
-			http.Error(w, "UI not found", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
-	})
+	mux.HandleFunc("POST /api/actions/{id}/reject", c.handleReject)
+	mux.HandleFunc("POST /api/loadtest/capacity", c.handleLoadtestCapacity)
+	mux.HandleFunc("POST /api/loadtest/badpod", c.handleLoadtestBadPod)
+	mux.HandleFunc("POST /api/loadtest/stop", c.handleLoadtestStop)
+	mux.HandleFunc("GET /api/loadtest/status", c.handleLoadtestStatus)
 
 	if c.metricsHandler != nil {
 		mux.Handle("GET /metrics", c.metricsHandler)
@@ -739,18 +730,8 @@ func (c *Controller) handleGetActionAPI(w http.ResponseWriter, r *http.Request) 
 	}
 	
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
-
-func (c *Controller) handleLatest(w http.ResponseWriter, r *http.Request) {
-	rec := c.PendingRecommendation()
-	if rec.ID == "" {
-		http.Error(w, "no recommendation available", http.StatusNotFound)
-		return
-	}
-	http.Redirect(w, r, "/actions/"+rec.ID, http.StatusFound)
-}
-
 
 func (c *Controller) handleApprove(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

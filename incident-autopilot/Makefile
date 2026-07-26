@@ -2,7 +2,7 @@ CLUSTER_NAME ?= autopilot
 NAMESPACE    ?= autopilot-demo
 UI_DIR       := internal/controller/ui
 
-.PHONY: test vet build build-local ui-build ui-dev cluster deploy load demo-capacity demo-bad-pod
+.PHONY: test vet build build-local ui-build ui-dev cluster deploy
 
 ui-build:
 	cd $(UI_DIR) && npm ci && npm run build
@@ -10,16 +10,16 @@ ui-build:
 ui-dev:
 	cd $(UI_DIR) && npm run dev
 
-test: ui-build
+test:
 	go test ./...
 
-vet: ui-build
+vet:
 	go vet ./...
 
-build-local: ui-build
+build-local:
 	go build -o bin/autopilot ./cmd/autopilot
 
-build: ui-build
+build:
 	docker build -t incident-autopilot:dev .
 
 cluster:
@@ -35,12 +35,3 @@ deploy:
 	kubectl apply -f deploy/demo-app.yaml
 	kubectl apply -f deploy/autopilot.yaml
 	kubectl apply -f deploy/scaledobject.yaml
-
-load:
-	kubectl apply -f deploy/load-generator.yaml
-
-demo-capacity:
-	./scripts/demo-capacity.sh
-
-demo-bad-pod:
-	./scripts/demo-bad-pod.sh

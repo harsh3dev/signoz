@@ -3,20 +3,18 @@
 # Idempotent: safe to re-run from scratch even if SigNoz/kind/images already exist.
 #
 # Usage:
-#   ./scripts/test-e2e.sh              # everything: setup + unit tests + both demos (manual approve)
-#   ./scripts/test-e2e.sh setup        # just get to a running baseline (SigNoz, kind, deploy)
+#   ./scripts/test-e2e.sh              # everything: setup + unit tests
+#   ./scripts/test-e2e.sh setup        # just get to a running baseline
 #   ./scripts/test-e2e.sh unit         # go test/vet only
-#   ./scripts/test-e2e.sh capacity     # capacity demo only (assumes setup done)
-#   ./scripts/test-e2e.sh badpod       # bad-pod demo only (assumes setup done)
-#   DEMO_AUTO_APPROVE=true ./scripts/test-e2e.sh   # unattended, no manual approve prompts
+#   ./scripts/test-e2e.sh capacity     # start capacity load via API (approve in UI)
+#   ./scripts/test-e2e.sh badpod       # start bad-pod load via API (approve in UI)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AUTOPILOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${AUTOPILOT_DIR}/.." && pwd)"
+API_URL="${AUTOPILOT_API_URL:-http://127.0.0.1:8090}"
 
-# nvm shell functions in this repo's dev environment are broken (_nvm_lazy_load
-# missing); use the real node/npm binaries directly instead of the shell fn.
 if [[ -d "${HOME}/.nvm/versions/node" ]]; then
   NODE_BIN="$(ls -d "${HOME}"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
   [[ -n "${NODE_BIN}" ]] && export PATH="${NODE_BIN}:${PATH}"
@@ -37,10 +35,19 @@ load_env() {
   fi
 }
 
+ensure_port_forward() {
+  if curl -sf "${API_URL}/metrics" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "==> starting port-forward ${API_URL}"
+  kubectl -n autopilot-demo port-forward svc/incident-autopilot 8090:8080 >/tmp/autopilot-pf.log 2>&1 &
+  sleep 2
+  curl -sf "${API_URL}/metrics" >/dev/null
+}
+
 run_unit() {
   step "Unit tests"
   cd "${AUTOPILOT_DIR}"
-  make ui-build
   go test ./...
   go vet ./...
 }
@@ -66,7 +73,7 @@ run_setup() {
   ./bin/autopilot install \
     --config config.local.yaml \
     --channel hackathon-email \
-    --approval-url http://localhost:8090
+    --approval-url http://localhost:5173
 
   step "Kind cluster + KEDA"
   cd "${REPO_ROOT}"
@@ -104,17 +111,25 @@ run_setup() {
 
 run_capacity() {
   load_env
-  step "Capacity incident demo"
-  cd "${AUTOPILOT_DIR}"
-  make demo-capacity
+  step "Capacity load (API)"
+  ensure_port_forward
+  curl -sf -X POST "${API_URL}/api/loadtest/capacity" \
+    -H 'Content-Type: application/json' \
+    -d '{"delayMs":1500,"vus":40,"durationSeconds":300}'
+  echo ""
+  echo "Load started. Open http://localhost:5173/actions to approve when scale_up appears."
 }
 
 run_badpod() {
   load_env
-  step "Bad-pod quarantine demo"
-  cd "${AUTOPILOT_DIR}"
+  step "Bad-pod load (API)"
   kubectl -n autopilot-demo scale deployment/checkout-api --replicas=2
-  make demo-bad-pod
+  ensure_port_forward
+  curl -sf -X POST "${API_URL}/api/loadtest/badpod" \
+    -H 'Content-Type: application/json' \
+    -d '{"errorRate":100}'
+  echo ""
+  echo "Bad-pod test started. Open http://localhost:5173/actions to approve quarantine_replace."
 }
 
 case "${1:-all}" in
@@ -125,9 +140,7 @@ case "${1:-all}" in
   all)
     run_unit
     run_setup
-    run_capacity
-    run_badpod
-    step "All done"
+    step "All done — start UI: cd internal/controller/ui && npm run dev"
     ;;
   *)
     echo "usage: $0 [unit|setup|capacity|badpod|all]" >&2
